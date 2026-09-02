@@ -1,0 +1,378 @@
+mod doctor;
+mod markdown;
+mod model;
+mod paths;
+mod rituals;
+mod store;
+mod util;
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+use model::State;
+use rituals::{Outcome, Ui};
+use store::Store;
+use util::{next_workday, parse_date, resolve_date, short};
+
+#[derive(Parser)]
+#[command(
+    name = "dayloop",
+    version,
+    about = "1日のタスクを 計画 → 確認 → 確定 → 振り返り で回す。忘れゼロは台帳で保証する。",
+    after_help = "終了コード: 0 完了 / 1 エラー / 2 本人の回答待ち"
+)]
+struct Cli {
+    /// 対話せずに実行する（回答が必要な項目は未回答のまま残し、終了コード 2）
+    #[arg(long, global = true)]
+    yes: bool,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// 今日の状態を表示
+    Today {
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// タスクを追加（既定は今日の予定）
+    Add {
+        title: String,
+        /// 期限 YYYY-MM-DD
+        #[arg(long)]
+        due: Option<String>,
+        /// 見積（分）
+        #[arg(long)]
+        estimate: Option<i64>,
+        /// 予定日（既定は今日）
+        #[arg(long)]
+        date: Option<String>,
+        /// 日付を決めず未計画に入れる
+        #[arg(long)]
+        backlog: bool,
+    },
+    /// 朝: 前日の未確定 → 候補 → 未計画 → 今日の予定を確定
+    Plan {
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// 昼: 未着手タスクの確認
+    Check {
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// 着手
+    Start {
+        id: String,
+        /// 未計画のタスクを予定に入れて着手する日（既定は今日）
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// 完了
+    Done {
+        id: String,
+        /// 完了の根拠（PR URL など）
+        #[arg(long)]
+        evidence: Option<String>,
+    },
+    /// 未完了（理由必須）
+    Notdone {
+        id: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// 持ち越し（理由必須。既定は次の営業日へ）
+    Carry {
+        id: String,
+        #[arg(long)]
+        reason: String,
+        /// 持ち越し先 YYYY-MM-DD
+        #[arg(long)]
+        to: Option<String>,
+        /// 期限を変更して持ち越す（持ち越し回数をリセット）
+        #[arg(long)]
+        reschedule: Option<String>,
+    },
+    /// 取り下げ（理由必須）
+    Drop {
+        id: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// 分割（元は取り下げ、分割先は次の営業日の予定）
+    Split {
+        id: String,
+        #[arg(long)]
+        reason: String,
+        /// 分割後のタイトル（2つ以上）
+        #[arg(long, required = true)]
+        into: Vec<String>,
+        /// 分割先の予定日（既定は次の営業日）
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// 夕: 全タスクを確定して日を閉じる
+    Close {
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// 週次の振り返り（指定日を含む週）
+    Retro {
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// 候補箱（外部から拾ったタスク候補）
+    #[command(subcommand)]
+    Candidates(CandCmd),
+    /// 当日の Markdown を書き出す
+    Export {
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// Markdown の手編集を取り込む
+    Import {
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// この PC で何が使えるかを診断
+    Doctor,
+    /// データの場所を表示
+    Where,
+}
+
+#[derive(Subcommand)]
+enum CandCmd {
+    /// 採用/却下待ちの候補を表示
+    List,
+    /// 候補を追加
+    Add {
+        title: String,
+        /// 出所（teams / outlook / meeting / alert / manual）
+        #[arg(long, default_value = "manual")]
+        source: String,
+        /// 元メッセージ等への参照。同じ参照は二度と候補にならない
+        #[arg(long = "ref")]
+        source_ref: Option<String>,
+    },
+    /// 候補をタスクにする（既定は今日の予定）
+    Accept {
+        id: String,
+        #[arg(long)]
+        backlog: bool,
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// 候補を却下
+    Reject { id: String },
+}
+
+fn finish(outcome: Outcome) -> i32 {
+    match outcome {
+        Outcome::Done => 0,
+        Outcome::Pending(_) => 2,
+    }
+}
+
+fn run() -> Result<i32> {
+    let cli = Cli::parse();
+    if let Cmd::Doctor = cli.cmd {
+        doctor::run();
+        return Ok(0);
+    }
+    if let Cmd::Where = cli.cmd {
+        println!("{}", paths::data_dir().display());
+        return Ok(0);
+    }
+    let store = Store::open()?;
+    let ui = Ui::new(cli.yes);
+
+    let code = match cli.cmd {
+        Cmd::Today { date } => {
+            let d = resolve_date(date.as_deref())?;
+            rituals::print_day(&store, &d)?;
+            0
+        }
+        Cmd::Add { title, due, estimate, date, backlog } => {
+            if let Some(d) = &due {
+                parse_date(d)?;
+            }
+            let plan = if backlog { None } else { Some(resolve_date(date.as_deref())?) };
+            let t = store.add_task(&title, due.as_deref(), estimate, "manual", None, plan.as_deref())?;
+            println!("追加: {}  {}  [{}]", short(&t.id), t.title, t.state.label_ja());
+            if let Some(d) = plan {
+                markdown::export(&store, &d)?;
+            }
+            0
+        }
+        Cmd::Plan { date } => {
+            let d = resolve_date(date.as_deref())?;
+            let o = rituals::plan_ritual(&store, &ui, &d)?;
+            markdown::export(&store, &d)?;
+            finish(o)
+        }
+        Cmd::Check { date } => {
+            let d = resolve_date(date.as_deref())?;
+            let o = rituals::check_ritual(&store, &ui, &d)?;
+            markdown::export(&store, &d)?;
+            finish(o)
+        }
+        Cmd::Start { id, date } => {
+            let mut t = store.get_task(&id)?;
+            if t.plan_date.is_none() {
+                let d = resolve_date(date.as_deref())?;
+                t = store.schedule(&t.id, &d)?;
+            }
+            let t = store.transition(&t.id, State::InProgress, None, None)?;
+            println!("着手: {}  {}", short(&t.id), t.title);
+            export_for(&store, &t)?;
+            0
+        }
+        Cmd::Done { id, evidence } => {
+            let t = store.transition(&id, State::Done, None, evidence.as_deref())?;
+            println!("完了: {}  {}", short(&t.id), t.title);
+            export_for(&store, &t)?;
+            0
+        }
+        Cmd::Notdone { id, reason } => {
+            let t = store.transition(&id, State::NotDone, Some(&reason), None)?;
+            println!("未完了: {}  {}  理由: {reason}", short(&t.id), t.title);
+            export_for(&store, &t)?;
+            0
+        }
+        Cmd::Carry { id, reason, to, reschedule } => {
+            let old = store.get_task(&id)?;
+            let base = old.plan_date.clone().unwrap_or_else(util::today);
+            let to = match to {
+                Some(t) => {
+                    parse_date(&t)?;
+                    t
+                }
+                None => next_workday(&base)?,
+            };
+            if let Some(r) = &reschedule {
+                parse_date(r)?;
+            }
+            let t = store.carry_over(&old.id, &reason, &to, reschedule.as_deref())?;
+            println!("持ち越し: {}  {}  -> {to}（{}回目）", short(&t.id), t.title, t.carried_count);
+            export_for(&store, &old)?;
+            export_for(&store, &t)?;
+            0
+        }
+        Cmd::Drop { id, reason } => {
+            let t = store.transition(&id, State::Dropped, Some(&reason), None)?;
+            println!("取り下げ: {}  {}  理由: {reason}", short(&t.id), t.title);
+            export_for(&store, &t)?;
+            0
+        }
+        Cmd::Split { id, reason, into, to } => {
+            let old = store.get_task(&id)?;
+            let base = old.plan_date.clone().unwrap_or_else(util::today);
+            let to = match to {
+                Some(t) => {
+                    parse_date(&t)?;
+                    t
+                }
+                None => next_workday(&base)?,
+            };
+            let news = store.split(&old.id, &into, &reason, &to)?;
+            println!("分割: {} -> {} 件（{to}）", old.title, news.len());
+            for n in &news {
+                println!("  {}  {}", short(&n.id), n.title);
+            }
+            export_for(&store, &old)?;
+            markdown::export(&store, &to)?;
+            0
+        }
+        Cmd::Close { date } => {
+            let d = resolve_date(date.as_deref())?;
+            let o = rituals::close_ritual(&store, &ui, &d)?;
+            markdown::export(&store, &d)?;
+            finish(o)
+        }
+        Cmd::Retro { date } => {
+            let d = resolve_date(date.as_deref())?;
+            finish(rituals::retro_ritual(&store, &ui, &d)?)
+        }
+        Cmd::Candidates(c) => match c {
+            CandCmd::List => {
+                let cands = store.open_candidates()?;
+                if cands.is_empty() {
+                    println!("候補なし");
+                }
+                for c in cands {
+                    let age = util::days_since(&c.created_at);
+                    let stale = if age >= store::CANDIDATE_STALE_DAYS { "  !! 放置" } else { "" };
+                    println!("{}  {}  ({}、{age}日前){stale}", short(&c.id), c.title, c.source);
+                }
+                0
+            }
+            CandCmd::Add { title, source, source_ref } => {
+                match store.add_candidate(&title, &source, source_ref.as_deref())? {
+                    Some(c) => println!("候補追加: {}  {}", short(&c.id), c.title),
+                    None => println!("同じ参照が既に存在するか却下済みのため追加しません"),
+                }
+                0
+            }
+            CandCmd::Accept { id, backlog, date } => {
+                let plan = if backlog { None } else { Some(resolve_date(date.as_deref())?) };
+                let t = store.accept_candidate(&id, plan.as_deref())?;
+                println!("採用: {}  {}  [{}]", short(&t.id), t.title, t.state.label_ja());
+                export_for(&store, &t)?;
+                0
+            }
+            CandCmd::Reject { id } => {
+                store.reject_candidate(&id)?;
+                println!("却下しました");
+                0
+            }
+        },
+        Cmd::Export { date } => {
+            let d = resolve_date(date.as_deref())?;
+            let p = markdown::export(&store, &d)?;
+            println!("{}", p.display());
+            0
+        }
+        Cmd::Import { date } => {
+            let d = resolve_date(date.as_deref())?;
+            let r = markdown::import(&store, &d)?;
+            println!("取り込み: 完了 {} 件、新規 {} 件", r.completed, r.added);
+            markdown::export(&store, &d)?;
+            0
+        }
+        Cmd::Doctor | Cmd::Where => unreachable!(),
+    };
+    Ok(code)
+}
+
+fn export_for(store: &Store, t: &model::Task) -> Result<()> {
+    if let Some(d) = &t.plan_date {
+        markdown::export(store, d)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_utf8_console() {
+    // Legacy conhost defaults to the OEM code page (932 on Japanese Windows).
+    // Switching this process's console to UTF-8 needs no admin rights.
+    use windows_sys::Win32::System::Console::{SetConsoleCP, SetConsoleOutputCP};
+    unsafe {
+        SetConsoleOutputCP(65001);
+        SetConsoleCP(65001);
+    }
+}
+
+#[cfg(not(windows))]
+fn set_utf8_console() {}
+
+fn main() {
+    set_utf8_console();
+    match run() {
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            eprintln!("エラー: {e}");
+            std::process::exit(1);
+        }
+    }
+}
