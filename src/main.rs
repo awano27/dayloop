@@ -1,18 +1,18 @@
-mod doctor;
-mod markdown;
-mod model;
-mod paths;
-mod rituals;
-mod store;
-mod util;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use model::State;
-use rituals::{Outcome, Ui};
-use store::Store;
-use util::{next_workday, parse_date, resolve_date, short};
+use dayloop::config;
+use dayloop::doctor;
+use dayloop::markdown;
+use dayloop::mcp;
+use dayloop::model;
+use dayloop::model::State;
+use dayloop::paths;
+use dayloop::rituals::{self, Outcome, Ui};
+use dayloop::serve;
+use dayloop::startup;
+use dayloop::store::{self, Store};
+use dayloop::util::{self, next_workday, parse_date, resolve_date, short};
 
 #[derive(Parser)]
 #[command(
@@ -139,6 +139,36 @@ enum Cmd {
     Doctor,
     /// データの場所を表示
     Where,
+    /// MCP サーバー（stdio）。stdout は JSON-RPC 専用
+    Mcp,
+    /// 常駐し、設定した時刻に非対話で plan / check / close / retro を実行する
+    Serve {
+        /// コンソールウィンドウを出さない（ログオン時向け）
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// ログオン時常駐の登録・解除
+    #[command(subcommand)]
+    Startup(StartupCmd),
+    /// 設定ファイル
+    #[command(subcommand)]
+    Config(ConfigCmd),
+}
+
+#[derive(Subcommand)]
+enum StartupCmd {
+    /// HKCU Run（失敗時はスタートアップフォルダ）に登録
+    Install,
+    /// 登録を削除
+    Remove,
+    /// どちらで登録されているかを表示
+    Status,
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// 既定の config.toml を生成
+    Init,
 }
 
 #[derive(Subcommand)]
@@ -182,6 +212,28 @@ fn run() -> Result<i32> {
     }
     if let Cmd::Where = cli.cmd {
         println!("{}", paths::data_dir().display());
+        return Ok(0);
+    }
+    if let Cmd::Mcp = cli.cmd {
+        mcp::run()?;
+        return Ok(0);
+    }
+    if let Cmd::Serve { quiet } = cli.cmd {
+        serve::run(quiet)?;
+        return Ok(0);
+    }
+    if let Cmd::Startup(s) = cli.cmd {
+        match s {
+            StartupCmd::Install => startup::install()?,
+            StartupCmd::Remove => startup::remove()?,
+            StartupCmd::Status => startup::status()?,
+        }
+        return Ok(0);
+    }
+    if let Cmd::Config(c) = cli.cmd {
+        match c {
+            ConfigCmd::Init => config::init()?,
+        }
         return Ok(0);
     }
     let store = Store::open()?;
@@ -340,7 +392,12 @@ fn run() -> Result<i32> {
             markdown::export(&store, &d)?;
             0
         }
-        Cmd::Doctor | Cmd::Where => unreachable!(),
+        Cmd::Doctor
+        | Cmd::Where
+        | Cmd::Mcp
+        | Cmd::Serve { .. }
+        | Cmd::Startup(_)
+        | Cmd::Config(_) => unreachable!(),
     };
     Ok(code)
 }

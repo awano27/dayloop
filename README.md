@@ -51,7 +51,28 @@ ID は表示されている末尾8文字で指定できます。
 | 1 | エラー |
 | 2 | 本人の回答待ち（`--yes` や非対話実行で未回答が残った） |
 
-定時実行（タスクスケジューラ等）では `--yes` を付け、終了コード 2 のときに通知を出す運用にします。
+定時実行（タスクスケジューラ等）では `--yes` を付け、終了コード 2 のときに通知を出す運用にします。常駐させる場合は下の `serve` を使います。
+
+## MCP
+
+```bash
+dayloop mcp
+```
+
+stdio で MCP サーバーが立ちます。設定例は [docs/mcp-clients.md](docs/mcp-clients.md)（VS Code / LM Studio / Claude Desktop）。ツールは `get_today` / `plan_day` / `close_day` など仕様書 §6 と同じ群です。`close_day` は open が残ると閉じず、`questions` を返します。
+
+## 常駐と定時実行
+
+```bash
+dayloop config init          # %LOCALAPPDATA%\dayloop\config.toml を生成
+dayloop serve                # 前面で常駐。1分ごとに時刻を見て非対話実行
+dayloop serve --quiet        # コンソールを出さない
+dayloop startup install      # ログオン時に serve --quiet を起動（HKCU Run）
+dayloop startup status
+dayloop startup remove
+```
+
+既定の時刻は plan 08:30 / check 13:00 / close 18:00 / retro `Fri 18:30`、平日のみ。回答が必要ならトースト（失敗時は `notify.txt`）を出し、`serve.log` に残します。PC が寝ていて時刻を過ぎていた場合は、復帰後の最初のチェックで未実行フェーズを1回ずつ実行します。
 
 ## Markdown
 
@@ -76,4 +97,4 @@ cargo build --release
 
 ## ロードマップ
 
-仕様は [../dayloop-spec.md](../dayloop-spec.md)。段階1（このリポジトリ）で忘れゼロは成立しており、以降は MCP サーバー化、Outlook COM 取り込み、VS Code 拡張版、会議・アラート・勤怠、M365 Copilot 接続の順に入口を増やします。
+仕様は [../dayloop-spec.md](../dayloop-spec.md)。段階2 まで（CLI + MCP + 常駐）。以降は Outlook COM 取り込み、VS Code 拡張版、会議・アラート・勤怠、M365 Copilot 接続の順に入口を増やします。

@@ -28,3 +28,19 @@ pub fn days_dir() -> PathBuf {
 pub fn day_md_path(date: &str) -> PathBuf {
     days_dir().join(format!("{date}.md"))
 }
+
+pub fn config_path() -> PathBuf {
+    data_dir().join("config.toml")
+}
+
+pub fn serve_state_path() -> PathBuf {
+    data_dir().join("serve-state.json")
+}
+
+pub fn serve_log_path() -> PathBuf {
+    data_dir().join("serve.log")
+}
+
+pub fn notify_file_path() -> PathBuf {
+    data_dir().join("notify.txt")
+}

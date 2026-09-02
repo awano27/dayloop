@@ -1,7 +1,8 @@
 // Some columns are stored for the MCP layer (stage 2) and not yet read by the CLI.
 #![allow(dead_code)]
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum State {
     Backlog,
     Planned,
@@ -67,7 +68,7 @@ impl State {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Task {
     pub id: String,
     pub title: String,
@@ -84,7 +85,7 @@ pub struct Task {
     pub closed_at: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Day {
     pub date: String,
     pub plan_confirmed_at: Option<String>,
@@ -92,7 +93,7 @@ pub struct Day {
     pub retro_note: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Candidate {
     pub id: String,
     pub title: String,
