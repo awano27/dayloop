@@ -2,3 +2,5 @@
 *.db
 *.db-wal
 *.db-shm
+# smoke test scratch data
+/scripts/dl-home/
