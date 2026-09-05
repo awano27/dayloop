@@ -19,6 +19,7 @@ impl Drop for Home {
 fn mcp_guard_reopen_and_diagnosis_keep_the_ledger_contract() {
     let home = Home::new();
     let store = Store::open_at(home.0.join("dayloop.db")).unwrap();
+    store.set_required_categories(&[]).unwrap();
     let day = json!({"date":"2026-09-07"});
     assert_eq!(tools::dispatch(&store, "close_day", &day)["closed"], true);
     assert!(tools::dispatch(

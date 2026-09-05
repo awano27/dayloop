@@ -1,11 +1,11 @@
 [package]
 name = "dayloop"
-version = "0.1.0"
+version = "0.2.0-beta.1"
 edition = "2021"
 description = "Plan / check / close / retro loop for daily tasks. Zero-forgetting is enforced by the ledger, not by an LLM."
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/OWNER/dayloop"
+repository = "https://github.com/awano27/dayloop"
 keywords = ["task", "mcp", "windows", "productivity", "cli"]
 categories = ["command-line-utilities"]
 
@@ -13,9 +13,11 @@ categories = ["command-line-utilities"]
 anyhow = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
+fs2 = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 toml = "0.8"
 ulid = "1"
 
@@ -26,9 +28,8 @@ windows = { version = "0.58", features = [
     "Win32_System_Ole",
     "Win32_System_Variant",
 ] }
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem"] }
 winreg = "0.52"
-winrt-notification = "0.5"
 
 [profile.release]
 opt-level = "z"

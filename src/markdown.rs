@@ -96,6 +96,22 @@ pub fn export(store: &Store, date: &str) -> Result<std::path::PathBuf> {
         }
     }
 
+    let reviews = store.reviews_for_day(date)?;
+    if !reviews.is_empty() {
+        out.push_str(
+            "\n## 日次確認\n\n確認結果は `dayloop reviews record` またはチャットで記録します。\n\n",
+        );
+        for r in reviews {
+            out.push_str(&format!(
+                "- {}: {}{}\n",
+                r.category.label_ja(),
+                r.outcome.as_str(),
+                r.reason
+                    .map(|s| format!(" — {}", s.replace(['\r', '\n'], " ")))
+                    .unwrap_or_default()
+            ));
+        }
+    }
     out.push_str("\n## 状態\n");
     match &day {
         Some(d) => {

@@ -24,10 +24,15 @@ jobs:
         run: bash scripts/smoke.sh
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: package local beta
+        shell: pwsh
+        run: ./scripts/package-beta.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: dayloop-windows-x64
-          path: target/release/dayloop.exe
+          path: |
+            target/beta/*.zip
+            target/beta/*.sha256
 
   linux:
     runs-on: ubuntu-latest

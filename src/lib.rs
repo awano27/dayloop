@@ -1,3 +1,4 @@
+pub mod business;
 #[cfg(windows)]
 pub mod com;
 pub mod config;
@@ -7,8 +8,10 @@ pub mod intake;
 pub mod markdown;
 pub mod mcp;
 pub mod model;
+pub mod note_intake;
 pub mod notify;
 pub mod paths;
+pub mod policy;
 pub mod rituals;
 pub mod serve;
 pub mod startup;

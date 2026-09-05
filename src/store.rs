@@ -66,6 +66,71 @@ CREATE TABLE IF NOT EXISTS events (
   synced_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_date ON events(date);
+CREATE TABLE IF NOT EXISTS required_categories (
+  category TEXT PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS review_sets (
+  date TEXT PRIMARY KEY,
+  prepared_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date TEXT NOT NULL,
+  category TEXT NOT NULL,
+  required INTEGER NOT NULL,
+  outcome TEXT NOT NULL,
+  reason TEXT,
+  task_id TEXT,
+  candidate_id TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reviews_date_category ON reviews(date,category,id);
+CREATE TABLE IF NOT EXISTS fetch_reports (
+  id TEXT PRIMARY KEY,
+  category TEXT NOT NULL,
+  source TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  status TEXT NOT NULL,
+  item_count INTEGER NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_fetch_reports_started_at ON fetch_reports(started_at);
+CREATE TABLE IF NOT EXISTS observations (
+  id TEXT PRIMARY KEY,
+  category TEXT NOT NULL,
+  source_ref TEXT NOT NULL,
+  meeting_id TEXT,
+  title TEXT NOT NULL,
+  body TEXT,
+  observed_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(category,source_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_observations_observed_at ON observations(observed_at);
+CREATE TABLE IF NOT EXISTS source_observations (
+  source_ref TEXT NOT NULL,
+  observation_id TEXT NOT NULL,
+  PRIMARY KEY(source_ref,observation_id),
+  FOREIGN KEY(observation_id) REFERENCES observations(id)
+);
+CREATE TABLE IF NOT EXISTS routines (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  weekdays TEXT NOT NULL,
+  enabled INTEGER NOT NULL,
+  starts_on TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS routine_occurrences (
+  routine_id TEXT NOT NULL,
+  date TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  PRIMARY KEY(routine_id,date),
+  FOREIGN KEY(routine_id) REFERENCES routines(id),
+  FOREIGN KEY(task_id) REFERENCES tasks(id)
+);
 "#;
 
 const TASK_COLS: &str = "id,title,source,source_ref,due,estimate_min,plan_date,state,state_reason,carried_count,evidence,created_at,closed_at";
@@ -187,7 +252,7 @@ impl Store {
 
     pub fn integrity_issues(&self) -> Result<Vec<LedgerIssue>> {
         let mut issues = Vec::new();
-        let mut statement = self.conn.prepare("SELECT t.id,t.plan_date,t.state,t.state_reason,t.carried_count,t.closed_at,d.closed_at FROM tasks t LEFT JOIN days d ON d.date=t.plan_date ORDER BY t.id")?;
+        let mut statement = self.conn.prepare("SELECT t.id,t.plan_date,t.state,t.state_reason,t.carried_count,t.closed_at,d.closed_at,d.date FROM tasks t LEFT JOIN days d ON d.date=t.plan_date ORDER BY t.id")?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
@@ -197,6 +262,7 @@ impl Store {
             let count: i64 = row.get(4)?;
             let closed: Option<String> = row.get(5)?;
             let day_closed: Option<String> = row.get(6)?;
+            let day_date: Option<String> = row.get(7)?;
             let mut report = |code: &str, detail: &str| {
                 issues.push(LedgerIssue {
                     code: code.into(),
@@ -227,6 +293,9 @@ impl Store {
             }
             if count < 0 {
                 report("negative_carry_count", "持ち越し回数が負の値です");
+            }
+            if date.is_some() && day_date.is_none() {
+                report("missing_day", "予定日の day レコードがありません");
             }
             if date.as_deref().is_some_and(|d| parse_date(d).is_err()) {
                 report("invalid_plan_date", "予定日が不正です");
@@ -279,9 +348,11 @@ impl Store {
 
     pub fn ensure_day(&self, date: &str) -> Result<()> {
         parse_date(date)?;
-        self.conn
-            .execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![date])?;
-        Ok(())
+        self.atomic(|| {
+            self.conn
+                .execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![date])?;
+            self.ensure_review_set(date)
+        })
     }
 
     pub fn get_day(&self, date: &str) -> Result<Option<Day>> {
@@ -331,6 +402,7 @@ impl Store {
                 return Ok(Err(open));
             }
             self.ensure_day(date)?;
+            self.require_reviews_resolved(date)?;
             self.conn.execute(
                 "UPDATE days SET closed_at=COALESCE(closed_at, ?2) WHERE date=?1",
                 params![date, now()],
@@ -361,12 +433,17 @@ impl Store {
     }
 
     pub fn set_retro(&self, date: &str, note: &str) -> Result<()> {
-        self.ensure_day(date)?;
-        self.conn.execute(
-            "UPDATE days SET retro_note=?2 WHERE date=?1",
-            params![date, note],
-        )?;
-        Ok(())
+        if note.trim().is_empty() {
+            bail!("振り返りメモは空にできません");
+        }
+        self.atomic(|| {
+            self.ensure_day(date)?;
+            self.conn.execute(
+                "UPDATE days SET retro_note=?2 WHERE date=?1",
+                params![date, note.trim()],
+            )?;
+            Ok(())
+        })
     }
 
     /// Invariant 5: prior unclosed ledger days, including empty/reopened days.
@@ -741,10 +818,11 @@ impl Store {
 
     /// Replace all events for `date` with `events` (empty clears that day).
     pub fn upsert_events(&self, date: &str, events: Vec<Event>) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM events WHERE date=?1", params![date])?;
+        parse_date(date)?;
+        self.atomic(|| {
+        self.conn.execute("DELETE FROM events WHERE date=?1", params![date])?;
         for e in &events {
-            tx.execute(
+            self.conn.execute(
                 "INSERT OR REPLACE INTO events(entry_id,date,start,end,subject,location,organizer,is_organizer,source,synced_at)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                 params![
@@ -761,8 +839,30 @@ impl Store {
                 ],
             )?;
         }
-        tx.commit()?;
-        Ok(())
+        Ok(()) })
+    }
+
+    /// Replace one source's successful calendar snapshot; a failed fetch must not call this.
+    pub fn upsert_events_from_source(
+        &self,
+        date: &str,
+        source: &str,
+        events: Vec<Event>,
+    ) -> Result<()> {
+        parse_date(date)?;
+        if source.trim().is_empty() {
+            bail!("予定の取得元は必須です");
+        }
+        self.atomic(|| {
+            self.conn.execute("DELETE FROM events WHERE date=?1 AND source=?2",params![date,source])?;
+            for e in &events {
+                if e.source!=source||e.date!=date {bail!("予定の取得元または日付が一致しません");}
+                let owner:Option<String>=self.conn.query_row("SELECT source FROM events WHERE entry_id=?1",[&e.entry_id],|r|r.get(0)).optional()?;
+                if owner.as_deref().is_some_and(|s|s!=source) {bail!("予定IDが別の取得元と競合しています");}
+                self.conn.execute("INSERT OR REPLACE INTO events(entry_id,date,start,end,subject,location,organizer,is_organizer,source,synced_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![e.entry_id,date,e.start,e.end,e.subject,e.location,e.organizer,e.is_organizer as i64,source,e.synced_at])?;
+            }
+            Ok(())
+        })
     }
 
     pub fn events_for_day(&self, date: &str) -> Result<Vec<Event>> {

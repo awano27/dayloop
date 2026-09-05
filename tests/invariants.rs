@@ -39,7 +39,9 @@ impl Home {
     }
 
     fn store(&self) -> Store {
-        Store::open().unwrap()
+        let store = Store::open_at(self.dir.join("dayloop.db")).unwrap();
+        store.set_required_categories(&[]).unwrap(); // This suite isolates the task contract.
+        store
     }
 }
 
@@ -79,13 +81,23 @@ fn invariant_2_reason_required() {
     let home = Home::new();
     let store = home.store();
     let d = "2026-09-03";
-    let a = store.add_task("A", None, None, "manual", None, Some(d)).unwrap();
-    let b = store.add_task("B", None, None, "manual", None, Some(d)).unwrap();
-    let c = store.add_task("C", None, None, "manual", None, Some(d)).unwrap();
+    let a = store
+        .add_task("A", None, None, "manual", None, Some(d))
+        .unwrap();
+    let b = store
+        .add_task("B", None, None, "manual", None, Some(d))
+        .unwrap();
+    let c = store
+        .add_task("C", None, None, "manual", None, Some(d))
+        .unwrap();
 
-    assert!(store.transition(&a.id, State::NotDone, Some(""), None).is_err());
+    assert!(store
+        .transition(&a.id, State::NotDone, Some(""), None)
+        .is_err());
     assert!(store.transition(&a.id, State::NotDone, None, None).is_err());
-    assert!(store.transition(&b.id, State::Dropped, Some("  "), None).is_err());
+    assert!(store
+        .transition(&b.id, State::Dropped, Some("  "), None)
+        .is_err());
     assert!(store.carry_over(&c.id, "   ", "2026-09-04", None).is_err());
 
     store
@@ -94,7 +106,9 @@ fn invariant_2_reason_required() {
     store
         .transition(&b.id, State::Dropped, Some("不要"), None)
         .unwrap();
-    store.carry_over(&c.id, "翌日へ", "2026-09-04", None).unwrap();
+    store
+        .carry_over(&c.id, "翌日へ", "2026-09-04", None)
+        .unwrap();
 }
 
 /// 3. carried_count が 3 になった Task は再持ち越しできない（期限変更以外）。
@@ -112,7 +126,9 @@ fn invariant_3_carry_limit() {
     let blocked = store.blocked_carry_tasks().unwrap();
     assert!(blocked.iter().any(|t| t.id == t3.id));
 
-    let err = store.carry_over(&t3.id, "4", "2026-09-07", None).unwrap_err();
+    let err = store
+        .carry_over(&t3.id, "4", "2026-09-07", None)
+        .unwrap_err();
     assert!(err.downcast_ref::<CarryBlocked>().is_some());
 
     let t4 = store

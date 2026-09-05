@@ -36,6 +36,10 @@ impl Drop for Home {
 #[test]
 fn explicit_reopen_requires_a_reason_and_allows_a_corrected_plan() {
     let home = Home::new();
+    dayloop::store::Store::open_at(home.0.join("dayloop.db"))
+        .unwrap()
+        .set_required_categories(&[])
+        .unwrap();
     home.ok(&["close", "--date", "2026-09-05", "--yes"]);
     assert!(!home
         .run(&["add", "late work", "--date", "2026-09-05"])

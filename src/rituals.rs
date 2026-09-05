@@ -17,7 +17,9 @@ pub struct Ui {
 impl Ui {
     pub fn new(yes: bool) -> Ui {
         // DAYLOOP_INTERACTIVE=1 forces prompts even when stdin is piped (tests, wrappers).
-        let forced = std::env::var("DAYLOOP_INTERACTIVE").map(|v| v == "1").unwrap_or(false);
+        let forced = std::env::var("DAYLOOP_INTERACTIVE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         Ui {
             interactive: !yes && (forced || io::stdin().is_terminal()),
         }
@@ -28,7 +30,12 @@ impl Ui {
         println!();
         println!("? {q}");
         for (i, o) in opts.iter().enumerate() {
-            println!("  {}) {}{}", i + 1, o, if i == 0 { "  (Enter で既定)" } else { "" });
+            println!(
+                "  {}) {}{}",
+                i + 1,
+                o,
+                if i == 0 { "  (Enter で既定)" } else { "" }
+            );
         }
         if !self.interactive {
             println!("  -> 対話できないため未回答のまま残します");
@@ -125,7 +132,10 @@ pub fn print_day(store: &Store, date: &str) -> Result<()> {
     println!("== {date}");
     match &day {
         Some(d) if d.closed_at.is_some() => {
-            println!("   クローズ済み {}", hhmm(d.closed_at.as_deref().unwrap_or("")))
+            println!(
+                "   クローズ済み {}",
+                hhmm(d.closed_at.as_deref().unwrap_or(""))
+            )
         }
         Some(d) if d.plan_confirmed_at.is_some() => println!(
             "   計画確定 {} / 未確定 {open} 件",
@@ -137,7 +147,11 @@ pub fn print_day(store: &Store, date: &str) -> Result<()> {
     if !events.is_empty() {
         println!("   [今日の予定]");
         for e in &events {
-            let loc = e.location.as_deref().map(|l| format!("  {l}")).unwrap_or_default();
+            let loc = e
+                .location
+                .as_deref()
+                .map(|l| format!("  {l}"))
+                .unwrap_or_default();
             println!(
                 "     {}-{}  {}{}",
                 hhmm(&e.start),
@@ -174,7 +188,14 @@ pub fn print_day(store: &Store, date: &str) -> Result<()> {
                 .as_ref()
                 .map(|r| format!("  理由: {r}"))
                 .unwrap_or_default();
-            println!("     {}  {}{}{}{}", short(&t.id), t.title, meta(t), overdue, reason);
+            println!(
+                "     {}  {}{}{}{}",
+                short(&t.id),
+                t.title,
+                meta(t),
+                overdue,
+                reason
+            );
         }
     }
     let cands = store.open_candidates()?;
@@ -186,7 +207,11 @@ pub fn print_day(store: &Store, date: &str) -> Result<()> {
         println!(
             "   候補 {} 件が採用/却下待ち{}",
             cands.len(),
-            if stale > 0 { format!("（うち {stale} 件が {CANDIDATE_STALE_DAYS} 日以上放置）") } else { String::new() }
+            if stale > 0 {
+                format!("（うち {stale} 件が {CANDIDATE_STALE_DAYS} 日以上放置）")
+            } else {
+                String::new()
+            }
         );
     }
     let unclosed = store.unclosed_days_before(date)?;
@@ -200,10 +225,15 @@ pub fn print_day(store: &Store, date: &str) -> Result<()> {
 fn carry_flow(store: &Store, ui: &Ui, t: &Task, date: &str) -> Result<bool> {
     let to = next_workday(date)?;
     if t.carried_count >= MAX_CARRY {
-        println!("  「{}」は既に {} 回持ち越されています。", t.title, t.carried_count);
+        println!(
+            "  「{}」は既に {} 回持ち越されています。",
+            t.title, t.carried_count
+        );
         return resolve_blocked(store, ui, t, &to);
     }
-    let Some(reason) = ui.text("持ち越す理由") else { return Ok(false) };
+    let Some(reason) = ui.text("持ち越す理由") else {
+        return Ok(false);
+    };
     match store.carry_over(&t.id, &reason, &to, None) {
         Ok(n) => {
             println!("  -> {to} に持ち越し（{}回目）", n.carried_count);
@@ -216,11 +246,22 @@ fn carry_flow(store: &Store, ui: &Ui, t: &Task, date: &str) -> Result<bool> {
 
 /// Invariant 3: split / drop / reschedule.
 fn resolve_blocked(store: &Store, ui: &Ui, t: &Task, to: &str) -> Result<bool> {
-    match ui.choose("どうしますか", &["分割する", "取り下げる", "期限を変えて持ち越す", "後で決める"]) {
+    match ui.choose(
+        "どうしますか",
+        &[
+            "分割する",
+            "取り下げる",
+            "期限を変えて持ち越す",
+            "後で決める",
+        ],
+    ) {
         Some(0) => {
             let mut titles = Vec::new();
             loop {
-                let Some(s) = ui.line(&format!("分割後のタスク {}（空行で終了）", titles.len() + 1)) else {
+                let Some(s) = ui.line(&format!(
+                    "分割後のタスク {}（空行で終了）",
+                    titles.len() + 1
+                )) else {
                     return Ok(false);
                 };
                 if s.is_empty() {
@@ -237,20 +278,26 @@ fn resolve_blocked(store: &Store, ui: &Ui, t: &Task, to: &str) -> Result<bool> {
             Ok(true)
         }
         Some(1) => {
-            let Some(r) = ui.text("取り下げる理由") else { return Ok(false) };
+            let Some(r) = ui.text("取り下げる理由") else {
+                return Ok(false);
+            };
             store.transition(&t.id, State::Dropped, Some(&r), None)?;
             println!("  -> 取り下げ");
             Ok(true)
         }
         Some(2) => {
             let due = loop {
-                let Some(d) = ui.text("新しい期限 (YYYY-MM-DD)") else { return Ok(false) };
+                let Some(d) = ui.text("新しい期限 (YYYY-MM-DD)") else {
+                    return Ok(false);
+                };
                 if parse_date(&d).is_ok() {
                     break d;
                 }
                 println!("  日付の形式が違います");
             };
-            let Some(r) = ui.text("持ち越す理由") else { return Ok(false) };
+            let Some(r) = ui.text("持ち越す理由") else {
+                return Ok(false);
+            };
             store.carry_over(&t.id, &r, to, Some(&due))?;
             println!("  -> 期限を {due} にして {to} に持ち越し（回数はリセット）");
             Ok(true)
@@ -261,12 +308,21 @@ fn resolve_blocked(store: &Store, ui: &Ui, t: &Task, to: &str) -> Result<bool> {
 
 /// Evening: every open task becomes done / not_done / carried / dropped, then the day closes.
 pub fn close_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
+    store.prepare_day(date)?;
     let open = store.open_tasks_for_day(date)?;
     println!("== {date} のクローズ: 未確定 {} 件", open.len());
     let mut pending = 0usize;
     for t in open {
         let q = format!("{}  {}{}", short(&t.id), t.title, meta(&t));
-        match ui.choose(&q, &["完了", "未完了（理由を書く）", "持ち越し（理由を書く）", "取り下げ（理由を書く）"]) {
+        match ui.choose(
+            &q,
+            &[
+                "完了",
+                "未完了（理由を書く）",
+                "持ち越し（理由を書く）",
+                "取り下げ（理由を書く）",
+            ],
+        ) {
             None => pending += 1,
             Some(0) => {
                 store.transition(&t.id, State::Done, None, None)?;
@@ -293,6 +349,7 @@ pub fn close_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
             },
         }
     }
+    pending += review_ritual(store, ui, date)?;
     if pending > 0 {
         println!();
         println!("未確定 {pending} 件。全件確定するまで {date} は閉じられません。");
@@ -311,11 +368,14 @@ pub fn close_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
 
 /// Morning: close leftovers first, triage candidates, pull backlog, confirm today's plan.
 pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
+    let prepared = store.prepare_day(date)?;
+    for gap in &prepared.missed_routines {
+        println!(
+            "未生成の定期タスク: {} {}（自動完了しません）",
+            gap.date, gap.title
+        );
+    }
     for d in store.unclosed_days_before(date)? {
-        if store.open_tasks_for_day(&d)?.is_empty() {
-            let _ = store.close_day(&d)?;
-            continue;
-        }
         println!("!! {d} が未確定のままです。先に確定します。");
         if let Outcome::Pending(n) = close_ritual(store, ui, &d)? {
             return Ok(Outcome::Pending(n));
@@ -332,9 +392,16 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     }
     for c in cands {
         let age = days_since(&c.created_at);
-        let stale = if age >= CANDIDATE_STALE_DAYS { format!("  !! {age} 日放置") } else { String::new() };
+        let stale = if age >= CANDIDATE_STALE_DAYS {
+            format!("  !! {age} 日放置")
+        } else {
+            String::new()
+        };
         let q = format!("{}  {}  ({}){stale}", short(&c.id), c.title, c.source);
-        match ui.choose(&q, &["今日の予定に入れる", "未計画に入れる", "却下", "後で決める"]) {
+        match ui.choose(
+            &q,
+            &["今日の予定に入れる", "未計画に入れる", "却下", "後で決める"],
+        ) {
             None => pending += 1,
             Some(0) => {
                 store.accept_candidate(&c.id, Some(date))?;
@@ -373,7 +440,10 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
         return Ok(Outcome::Pending(pending));
     }
     let n = store.open_tasks_for_day(date)?.len();
-    match ui.choose(&format!("{date} の予定 {n} 件をこの内容で確定しますか"), &["確定する", "まだ"]) {
+    match ui.choose(
+        &format!("{date} の予定 {n} 件をこの内容で確定しますか"),
+        &["確定する", "まだ"],
+    ) {
         Some(0) => {
             store.confirm_plan(date)?;
             println!("確定しました。");
@@ -385,17 +455,28 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
 
 /// Midday: untouched tasks get a decision.
 pub fn check_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
+    store.prepare_day(date)?;
     let open = store.open_tasks_for_day(date)?;
-    let doing: Vec<&Task> = open.iter().filter(|t| t.state == State::InProgress).collect();
+    let doing: Vec<&Task> = open
+        .iter()
+        .filter(|t| t.state == State::InProgress)
+        .collect();
     let untouched: Vec<&Task> = open.iter().filter(|t| t.state == State::Planned).collect();
-    println!("== {date} の途中確認: 未着手 {} 件 / 進行中 {} 件", untouched.len(), doing.len());
+    println!(
+        "== {date} の途中確認: 未着手 {} 件 / 進行中 {} 件",
+        untouched.len(),
+        doing.len()
+    );
     for t in &doing {
         println!("   進行中  {}  {}{}", short(&t.id), t.title, meta(t));
     }
     let mut pending = 0usize;
     for t in untouched {
         let q = format!("未着手  {}  {}{}", short(&t.id), t.title, meta(t));
-        match ui.choose(&q, &["今日中にやる", "今から着手", "持ち越す", "取り下げる"]) {
+        match ui.choose(
+            &q,
+            &["今日中にやる", "今から着手", "持ち越す", "取り下げる"],
+        ) {
             None => pending += 1,
             Some(0) => {}
             Some(1) => {
@@ -416,10 +497,79 @@ pub fn check_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
             },
         }
     }
+    pending += review_ritual(store, ui, date)?;
     if pending > 0 {
         return Ok(Outcome::Pending(pending));
     }
     Ok(Outcome::Done)
+}
+
+fn review_ritual(store: &Store, ui: &Ui, date: &str) -> Result<usize> {
+    use crate::business::ReviewOutcome;
+    for r in store.pending_reviews(date)? {
+        match ui.choose(
+            &format!("{} の {} を確認しましたか", date, r.category.label_ja()),
+            &[
+                "確認済み",
+                "対応が必要（保存済みIDを指定）",
+                "未確認（理由を残す）",
+                "後で確認",
+            ],
+        ) {
+            Some(0) => {
+                store.record_review(
+                    date,
+                    r.category,
+                    ReviewOutcome::Confirmed,
+                    None,
+                    None,
+                    None,
+                )?;
+            }
+            Some(1) => {
+                if let Some(id) = ui.text("関連タスクまたは候補の完全ID") {
+                    let kind = ui.choose("関連付ける種類", &["タスク", "候補"]);
+                    match kind {
+                        Some(0) => {
+                            store.record_review(
+                                date,
+                                r.category,
+                                ReviewOutcome::NeedsAction,
+                                None,
+                                Some(&id),
+                                None,
+                            )?;
+                        }
+                        Some(1) => {
+                            store.record_review(
+                                date,
+                                r.category,
+                                ReviewOutcome::NeedsAction,
+                                None,
+                                None,
+                                Some(&id),
+                            )?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some(2) => {
+                if let Some(reason) = ui.text("確認できなかった理由") {
+                    store.record_review(
+                        date,
+                        r.category,
+                        ReviewOutcome::NotChecked,
+                        Some(&reason),
+                        None,
+                        None,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(store.pending_reviews(date)?.len())
 }
 
 /// Weekly: numbers, repeat offenders, a note.
@@ -444,7 +594,10 @@ pub fn retro_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     let end = parse_date(&to)?;
     while d <= end {
         let ds = d.format("%Y-%m-%d").to_string();
-        let day: Vec<&Task> = tasks.iter().filter(|t| t.plan_date.as_deref() == Some(&ds)).collect();
+        let day: Vec<&Task> = tasks
+            .iter()
+            .filter(|t| t.plan_date.as_deref() == Some(&ds))
+            .collect();
         if !day.is_empty() {
             let c = |s: State| day.iter().filter(|t| t.state == s).count();
             println!(
@@ -465,7 +618,12 @@ pub fn retro_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
         println!();
         println!("   持ち越しが多いタスク:");
         for t in repeat.iter().take(5) {
-            println!("     {}回  {}  [{}]", t.carried_count, t.title, t.state.label_ja());
+            println!(
+                "     {}回  {}  [{}]",
+                t.carried_count,
+                t.title,
+                t.state.label_ja()
+            );
         }
     }
 
@@ -473,7 +631,10 @@ pub fn retro_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     let blocked = store.blocked_carry_tasks()?;
     if !blocked.is_empty() {
         println!();
-        println!("== {MAX_CARRY} 回以上持ち越したタスク {} 件。方針を決めてください。", blocked.len());
+        println!(
+            "== {MAX_CARRY} 回以上持ち越したタスク {} 件。方針を決めてください。",
+            blocked.len()
+        );
     }
     for t in blocked {
         println!();
@@ -486,7 +647,7 @@ pub fn retro_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
 
     if let Some(note) = ui.line("振り返りメモ（空でも可）") {
         if !note.is_empty() {
-            store.set_retro(&to, &note)?;
+            store.set_retro(date, &note)?;
             println!("  -> 記録しました");
         }
     }

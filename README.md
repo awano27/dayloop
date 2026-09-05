@@ -1,168 +1,152 @@
 # dayloop
 
-**What.** A local CLI that runs a daily plan → check → close → retro loop for tasks.
-**Why.** Zero-forgetting is enforced by ledger invariants, not by an LLM.
-**Requirements.** Windows 10/11; no admin rights. Classic Outlook is optional (COM intake).
+PdM・PjM・エンジニアの日々の仕事を、**計画 → 確認 → 終了 → 振り返り**で回すローカル業務台帳です。AIチャット、CLI、Markdownから同じ台帳を使います。
 
-Repository: https://github.com/OWNER/dayloop
+[Repository](https://github.com/awano27/dayloop) · [チャット設定](docs/mcp-clients.md) · [会話レシピ](docs/chat-workflows.md) · [実環境の受入れ](docs/client-acceptance.md) · [実装計画](PLAN.md)
 
-1日のタスクを **計画 → 途中確認 → 確定 → 振り返り** で回す CLI。
-「できたのか・できていないのか・忘れているものは無いか」を、LLM ではなく台帳の不変条件で保証します。
+現在は exe 版の開発ベータです。Teams、Outlook、勤怠、タスク、アラート、会議準備、会議結果の**7カテゴリを確認し、対応を候補・タスクに残す**共通機能を備えています。外部サービスの自動取得はクラシックOutlook COMのみ実装しています。実Outlook接続、実AIクライアント、5営業日の継続利用は別の受入れ項目です。
 
-- 管理者権限なしで動く単一 exe（書き込み先は `%LOCALAPPDATA%\dayloop` のみ）
-- LLM は M365 Copilot / GitHub Copilot / ローカル LLM のどれでも。無くても動く
-- 当日分は Markdown にも書き出され、手で編集して取り込める
+## 始める
 
-## 不変条件（コードで強制）
+Rustでビルドした `target/release/dayloop.exe`、または開発者から渡されたベータZIPをユーザーフォルダへ置きます。公開Releaseが存在することや、企業のアプリ制御で許可されることは前提にしません。
 
-1. 今日のタスクが全件「完了・未完了・持ち越し・取り下げ」になるまで、その日は閉じられない
-2. 未完了・持ち越し・取り下げには理由が必須
-3. 3回持ち越したタスクは、分割・取り下げ・期限変更のどれかを選ぶまで再持ち越しできない
-4. 外部から拾った候補は、採用か却下するまで消えない（7日放置で強調表示）
-5. 前日を閉じていなければ、翌朝の計画は前日の確定から始まる
-
-## 1日の流れ
-
-```bash
-dayloop plan     # 朝: 前日の未確定 → 候補 → 未計画 → 今日の予定を確定
-dayloop check    # 昼: 未着手タスクをどうするか
-dayloop close    # 夕: 全件確定して日を閉じる（未確定が残ると閉じない）
-dayloop retro    # 週末: 完了率・持ち越し上位・メモ
+```powershell
+.\dayloop.exe setup
+.\dayloop.exe doctor
+.\dayloop.exe plan
 ```
 
-途中の操作:
+実行時にPowerShell、Node、追加ブラウザ、管理者権限は必要ありません。上のPowerShellは入力例です。データは `%LOCALAPPDATA%\dayloop`、または明示した `DAYLOOP_HOME` に保存します。初期設定は既存の `config.toml` を上書きせず、Outlook接続とクラウドAI開示は初期状態で無効です。
 
-```bash
-dayloop add "仕様書レビュー" --due 2026-09-05
-dayloop add "いつかやる調査" --backlog
-dayloop start 4CFD6BRC
-dayloop done 4CFD6BRC --evidence https://github.com/org/repo/pull/12
-dayloop notdone 4CFD6BRC --reason "レビュー待ち"
-dayloop carry 4CFD6BRC --reason "領収書未着"          # 次の営業日へ
-dayloop carry 4CFD6BRC --reason "期限見直し" --reschedule 2026-09-10
-dayloop split 4CFD6BRC --reason "大きすぎる" --into "領収書を集める" --into "申請入力"
-dayloop drop 4CFD6BRC --reason "不要になった"
-dayloop candidates add "田中さんに返信" --source teams --ref teams:msg:123
-dayloop today
-dayloop doctor   # この PC で何が使えるか（exe 制御・Outlook COM・Edge・schtasks・ローカル LLM）
+## 一日の操作
+
+```text
+dayloop plan
+dayloop check
+dayloop close
+dayloop retro
 ```
 
-ID は表示されている末尾8文字で指定できます。
+- 朝は前の未閉鎖日、候補、未計画タスクを確認し、本人の回答で計画を確定します。
+- 昼は未着手と日次確認を見直します。
+- 夕方はタスクの結果と7カテゴリの回答を記録します。未回答があれば日を閉じません。
+- 週次は完了率、持ち越し、確認履歴、振り返りメモを見ます。
 
-## 台帳の診断・訂正・バックアップ
+```text
+dayloop add "仕様レビュー" --date 2026-09-07 --due 2026-09-08
+dayloop start <ID>
+dayloop done <ID> --evidence "レビュー結果を本人が確認"
+dayloop notdone <ID> --reason "回答待ち"
+dayloop carry <ID> --reason "確認資料が未着" --to 2026-09-08
+dayloop drop <ID> --reason "対応不要と確認"
+dayloop split <ID> --reason "作業を分ける" --into "資料を集める" --into "内容を確認する"
+```
 
-```bash
+既存のタスク操作は完全IDまたは一意な末尾IDを使えます。日次確認への関連付け、出典参照、定期タスクの変更は完全IDを指定します。
+
+## 日次確認・定期タスク・会議メモ
+
+| 結果 | 意味 |
+|---|---|
+| `pending` | 回答待ち。必須なら日を閉じられない |
+| `confirmed` | 本人が確認済みと回答 |
+| `needs_action` | 保存済みタスクか未却下候補の完全IDを関連付ける |
+| `not_checked` | 未確認の理由を残す。翌日の確認は無効化しない |
+
+```text
+dayloop reviews list --date 2026-09-07
+dayloop reviews record attendance confirmed --date 2026-09-07
+dayloop reviews record alerts not_checked --reason "今日は接続できない" --date 2026-09-07
+dayloop reviews record meeting_results needs_action --candidate-id <完全ID> --date 2026-09-07
+dayloop routines add "勤怠の確認" --weekdays Mon,Tue,Wed,Thu,Fri --starts-on 2026-09-07
+dayloop routines list
+dayloop routines disable <完全ID>
+dayloop note --category meeting_results --title "定例会議" --file meeting.txt --meeting-id meeting-123
+dayloop retro --date 2026-09-07 --note "次週は依頼の期限を先に確認する"
+```
+
+`meeting.txt` はUTF-8で、`ACTION: 資料を確認する`、`TODO:`、`宿題:`、`対応:` の行を候補にします。コードブロックと引用行は除外し、本文の命令を実行しません。採用や完了は別の本人回答が必要です。最大50候補、各タイトル512バイト、本文1MiBです。同じ資料の再取り込みで候補IDと却下を維持します。`--source-ref` で指定した参照の内容は不変で、改訂資料には新しい参照を付けます。
+
+定期タスクは `plan` / `today` / `check` / `close` などで日を準備した時に、曜日と日付ごとに一度だけ生成します。未生成の過去日は直近30日まで知らせ、自動で完了扱いにしません。
+
+必須カテゴリの変更は、次に初めて準備する日から適用します。既存の確認は消しません。
+
+```text
+dayloop reviews configure --categories teams,outlook,attendance,tasks,alerts,meeting_prep,meeting_results
+```
+
+タスクだけで運用する場合は `dayloop reviews configure --none` を明示指定できます。旧形式から移行した既存日には新しい必須確認を遡って付けません。
+
+## 台帳が守ること
+
+未確定タスクや必須確認が残る日は閉じられません。未完了・持ち越し・取り下げには理由が必要です。3回持ち越した後は分割・取り下げ・実際の期限変更を選ぶまで再持ち越しできません。同じ期限の再指定では回数をリセットしません。
+
+閉鎖日へのタスク追加・候補採用・移動は拒否します。訂正は理由付きで再開し、タスク結果は保持します。前の未閉鎖日は空の日も含めて、翌日の計画確定を妨げます。
+
+```text
 dayloop ledger check --json
 dayloop backup
-dayloop reopen --date 2026-09-05 --reason "追加作業が判明したため"
+dayloop reopen --date 2026-09-07 --reason "追加作業が判明したため"
 ```
 
-`ledger check` は既存のDBを読み取り専用で検査します。DBが無い場合は作成せず、未知の新しい形式や必要なテーブルの欠落もエラーにします。閉鎖済みの日に未完了タスクがあるなどの矛盾は、修復せずに報告します。
+診断は読み取り専用で、自動修復しません。移行前には `backups/` へ整合したSQLiteコピーを保存し、失敗時はDBの変更を取り消します。未知の新形式や必要なテーブルの欠落は拒否します。手動バックアップ先はデータ領域内に限定し、既存ファイルは上書きしません。
 
-閉鎖済みの日には、タスク追加・候補採用・持ち越し・分割先指定ができません。訂正が必要なら本人が理由付きで再開します。再開は日時と理由を履歴に保存し、日次の閉鎖・計画確定を解除します。タスクの完了結果は変更しません。
+## AIチャットと開示
 
-予定済みタスクの移動には理由付きの `carry` を使います。MCPの `schedule_task` は未計画タスク専用です。同じ期限の再指定では持ち越し回数をリセットしません。タスク0件の日を含め、前の未閉鎖日が残っている間は次の日の計画を確定できません。
-
-既存の台帳を初めて開くときは、`backups/` に移行前の整合したコピーを保存してからスキーマを更新します。移行に失敗した場合はDB変更を取り消します。`backup` は同じデータ領域の `backups/` にコピーを作り、`--output` で領域内の別名も指定できます。既存ファイルは上書きしません。
-
-Markdownの取込は全行を一括で反映します。不正なIDや別日のタスクが含まれる場合、途中までの追加・完了も取り消します。
-
-## 終了コード
-
-| コード | 意味 |
-|---|---|
-| 0 | 完了 |
-| 1 | エラー |
-| 2 | 本人の回答待ち（`--yes` や非対話実行で未回答が残った） |
-
-定時実行（タスクスケジューラ等）では `--yes` を付け、終了コード 2 のときに通知を出す運用にします。常駐させる場合は下の `serve` を使います。
-
-## MCP
-
-```bash
-dayloop mcp
+```text
+dayloop mcp --profile local
+dayloop mcp --profile github-copilot
 ```
 
-stdio で MCP サーバーが立ちます。設定例は [docs/mcp-clients.md](docs/mcp-clients.md)（VS Code / LM Studio / Claude Desktop）。ツールは `get_today` / `plan_day` / `close_day` など仕様書 §6 と同じ群です。`close_day` は open が残ると閉じず、`questions` を返します。
+stdio MCPは `plan_day`、`record_review`、`ingest_note`、`close_day` などを提供します。GitHub Copilotプロファイルは `[ai.github_copilot] enabled=true` の明示設定が必要です。本文・抜粋・出典参照・根拠・ノートは別の開示スイッチで制御します。ローカルプロファイルは全情報を返すため、ローカルAI用に使います。
 
-## 常駐と定時実行
+dayloopはクライアントの身元や通信を強制管理しません。クラウドのチャット欄へ直接貼った情報はdayloopの制御対象外です。LM StudioとVS Codeの設定例は[接続ガイド](docs/mcp-clients.md)を参照してください。M365 Copilot用の接続は未実装です。
 
-```bash
-dayloop config init          # %LOCALAPPDATA%\dayloop\config.toml を生成
-dayloop serve                # 前面で常駐。1分ごとに時刻を見て非対話実行
-dayloop serve --quiet        # コンソールを出さない
-dayloop startup install      # ログオン時に serve --quiet を起動（HKCU Run）
+## 常駐と通知
+
+```text
+dayloop serve
+dayloop serve --quiet
+dayloop startup install
 dayloop startup status
 dayloop startup remove
 ```
 
-既定の時刻は plan 08:30 / check 13:00 / close 18:00 / retro `Fri 18:30`、平日のみ。回答が必要ならトースト（失敗時は `notify.txt`）を出し、`serve.log` に残します。PC が寝ていて時刻を過ぎていた場合は、復帰後の最初のチェックで未実行フェーズを1回ずつ実行します。plan / check の直前に Outlook 取り込みを試み、失敗はログだけです。
+既定は平日08:30、13:00、18:00です。金曜の週次確認は18:00にまとめます。復帰時は経過した確認をまとめて通知し、回答待ちは次の時間帯で再評価します。通知したことを計画確定・完了・日次終了と扱いません。同じデータ領域での常駐二重起動を拒否します。
 
-## 取り込み（Outlook）
+Windows通知はWin32のバルーン通知です。APIが受け付けても、人に表示された・読まれたとは証明しません。失敗時は `notify.txt` へ保存し、ファイル保存にも失敗した場合はエラーを記録します。`config.toml` の `[notify] method="file"` または `"none"` も選べます。評価状態は `serve-state.json`、運転記録は `serve.log` に保存します。
 
-```bash
-dayloop intake outlook              # COM で受信トレイ・予定表を読む
+`dayloop doctor --notify-test` は明示的に検証通知を送ります。通常の `doctor` はデータを書き込まず、接続や通知を開始しません。
+
+自動起動は本人が `startup install` を実行した時だけHKCU Runへ登録します。別の登録は上書き・削除せず、Startupフォルダへの代替スクリプトも作りません。登録時の実行ファイルとデータ領域を記憶します。
+
+## Outlookと取得結果
+
+接続する場合だけ、`config.toml` の `[intake] outlook=true` を設定します。本文取得は別途 `read_body=true` が必要です。
+
+```text
 dayloop intake outlook --since 3d --dry-run
-dayloop intake fixture fixtures/outlook   # デモ用 JSON
+dayloop intake outlook
 ```
 
-クラシック Outlook が入っていれば管理者権限なしで Candidate と当日の予定に流れます。新しい Outlook（olk.exe）や未インストールでは 1 行メッセージで終了コード 0 です。本文・メールアドレスは既定で読みません。
+クラシックOutlook COMでメール・予定を読み、候補と出典を保存します。新しいOutlookや未接続環境では利用不可を報告します。送信・既読化・フラグ変更・勤怠打刻・アラート承認は行いません。
 
-`config.toml` の `[intake]`:
+メールと予定を別々に扱い、一方の失敗で取得済みの他方を失いません。成功0件、一部取得、失敗、利用不可、無効を区別します。取得結果は本人の確認結果やタスク完了とは独立です。Teams・勤怠・アラートは現時点では手動確認・メモ取り込みを使います。
 
-```toml
-[intake]
-outlook = true
-lookback_days = 3
-read_body = false
-keywords = ["お願い", "ご確認", "please"]
-important_senders = []
-meeting_prep = true
-meeting_prep_only_required = true
+## Markdownと終了コード
+
+`days/YYYY-MM-DD.md` は台帳の写しです。`今日のタスク` の `[ ]` を `[x]` に変えて `dayloop import` で完了を反映できます。同じ欄の新しい `- [ ]` 行は新規タスクになります。不正IDや他日タスクがある場合は取り込み全体を取り消します。日次確認の欄は表示用で、変更はCLI・チャットから記録します。
+
+終了コードは `0` 完了、`1` エラー、`2` 本人の回答待ちです。`--yes` は自動承認ではなく、非対話で未回答を残す指定です。取得の部分失敗は状態を出力して正常にコマンドを終了する場合があるため、取得件数だけで成功を判断しないでください。
+
+## 開発と配布準備
+
+```text
+cargo test --no-fail-fast
+cargo clippy --all-targets -- -D warnings
+cargo build --release --locked
 ```
 
-## Markdown
+Windowsの開発用 `scripts/package-beta.ps1` は、ソースコミット・実行ファイル・文書・チェックサムを含むローカルZIPを生成します。署名やGitHub Release公開は行いません。運用評価は[受入れ手順](docs/client-acceptance.md)に記録します。
 
-`%LOCALAPPDATA%\dayloop\days\YYYY-MM-DD.md` に当日分が書き出されます。
-`- [ ]` を `- [x]` にすると `dayloop import` で完了になり、`## 今日のタスク` の下に `- [ ] 新しい行` を足すと新規タスクになります。
-
-## 環境変数
-
-| 変数 | 用途 |
-|---|---|
-| `DAYLOOP_HOME` | データの場所を変える（既定は `%LOCALAPPDATA%\dayloop`） |
-| `DAYLOOP_LLM_ENDPOINT` | OpenAI 互換エンドポイント（段階2以降で使用。未設定でも動く） |
-| `DAYLOOP_INTERACTIVE=1` | パイプ入力でも対話プロンプトを出す（テスト・ラッパー用） |
-
-## ビルド
-
-```bash
-cargo build --release
-```
-
-`target/release/dayloop.exe` を任意のユーザーフォルダに置くだけで動きます。
-
-## インストール
-
-1. [Releases](https://github.com/OWNER/dayloop/releases) から zip をダウンロードして展開する
-2. `dayloop.exe` を任意のユーザーフォルダに置く（管理者権限は不要）
-3. SmartScreen が出たら「詳細情報 → 実行」で通る（管理者昇格は不要）
-4. 書き込み先は `%LOCALAPPDATA%\dayloop` のみ
-
-## 動作条件
-
-- Windows 10 / 11
-- 旧 Outlook（クラシック）がある場合のみ COM 取り込みが有効。無くても計画・確認・クローズ・MCP・常駐は動く
-
-## セキュリティ
-
-- ネットワーク送信なし
-- パスワード・トークンを扱わない
-- Outlook への書き込みなし（送信・既読化・フラグ変更をしない）
-- 本文・メールアドレスは既定で読まない
-
-判断の記録は [docs/decisions.md](docs/decisions.md)。
-
-## ロードマップ
-
-仕様は [../dayloop-spec.md](../dayloop-spec.md)。段階3 まで（CLI + MCP + 常駐 + Outlook COM 取り込み）は実装済み。段階4 以降（VS Code 拡張版、会議・アラート・勤怠、M365 Copilot 接続）は予定です。
+Edge自動取得はexe版の受入れ後、exe不要VS Code版は契約が固まった後に進めます。Graph/M365は組織が許可したテナント・試験アカウントを用意してからです。クリーンWindows、企業ポリシー、コード署名、実クライアント接続、5営業日の実利用は、単体テストやCIの成功と区別します。

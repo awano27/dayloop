@@ -31,6 +31,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// 初期設定を生成（既存設定と接続許可は変更しない）
+    Setup,
+    /// 7カテゴリの日次確認
+    #[command(subcommand)]
+    Reviews(ReviewCmd),
+    /// 曜日ごとの定期タスク
+    #[command(subcommand)]
+    Routines(RoutineCmd),
+    /// ACTION/TODO/宿題/対応 行を候補として取り込む
+    Note {
+        #[arg(long)]
+        category: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long, conflicts_with = "file")]
+        body: Option<String>,
+        #[arg(long, conflicts_with = "body")]
+        file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        source_ref: Option<String>,
+        #[arg(long)]
+        meeting_id: Option<String>,
+    },
     /// 閉鎖済みの日を理由付きで再開（タスクの結果は変更しない）
     Reopen {
         #[arg(long)]
@@ -136,6 +159,9 @@ enum Cmd {
     Retro {
         #[arg(long)]
         date: Option<String>,
+        /// 本人の振り返りを保存する
+        #[arg(long)]
+        note: Option<String>,
     },
     /// 候補箱（外部から拾ったタスク候補）
     #[command(subcommand)]
@@ -151,16 +177,27 @@ enum Cmd {
         date: Option<String>,
     },
     /// この PC で何が使えるかを診断
-    Doctor,
+    Doctor {
+        /// 検証通知を送る（省略時は読み取り専用。失敗時はデータ領域のファイルに保存）
+        #[arg(long)]
+        notify_test: bool,
+    },
     /// データの場所を表示
     Where,
     /// MCP サーバー（stdio）。stdout は JSON-RPC 専用
-    Mcp,
+    Mcp {
+        /// local | github-copilot（クラウド送信はconfig.tomlで個別に許可）
+        #[arg(long, value_enum, default_value_t = dayloop::policy::Profile::Local)]
+        profile: dayloop::policy::Profile,
+    },
     /// 常駐し、設定した時刻に非対話で plan / check / close / retro を実行する
     Serve {
         /// コンソールウィンドウを出さない（ログオン時向け）
         #[arg(long)]
         quiet: bool,
+        /// 常駐時のデータ領域（startup登録で引き継ぐ絶対パス）
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
     },
     /// ログオン時常駐の登録・解除
     #[command(subcommand)]
@@ -198,11 +235,11 @@ enum IntakeCmd {
 
 #[derive(Subcommand)]
 enum StartupCmd {
-    /// HKCU Run（失敗時はスタートアップフォルダ）に登録
+    /// HKCU Run に明示登録（別の登録は上書きしない）
     Install,
     /// 登録を削除
     Remove,
-    /// どちらで登録されているかを表示
+    /// HKCU Run 登録状態を表示
     Status,
 }
 
@@ -238,6 +275,62 @@ enum CandCmd {
     Reject { id: String },
 }
 
+#[derive(Subcommand)]
+enum ReviewCmd {
+    List {
+        #[arg(long)]
+        date: Option<String>,
+    },
+    Record {
+        category: String,
+        outcome: String,
+        #[arg(long)]
+        date: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long)]
+        candidate_id: Option<String>,
+    },
+    /// 次に初めて準備する日から適用。--none はタスクだけの運用
+    Configure {
+        #[arg(
+            long,
+            value_delimiter = ',',
+            required_unless_present = "none",
+            conflicts_with = "none"
+        )]
+        categories: Vec<String>,
+        #[arg(long)]
+        none: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RoutineCmd {
+    List,
+    Add {
+        title: String,
+        #[arg(long, value_delimiter = ',', required = true)]
+        weekdays: Vec<String>,
+        #[arg(long)]
+        starts_on: String,
+    },
+    Enable {
+        id: String,
+    },
+    Disable {
+        id: String,
+    },
+}
+
+fn print_tool(store: &Store, name: &str, args: serde_json::Value) -> Result<i32> {
+    let result = dayloop::tools::dispatch(store, name, &args);
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(if result.get("error").is_some() { 1 } else { 0 })
+}
+
 fn finish(outcome: Outcome) -> i32 {
     match outcome {
         Outcome::Done => 0,
@@ -247,19 +340,35 @@ fn finish(outcome: Outcome) -> i32 {
 
 fn run() -> Result<i32> {
     let cli = Cli::parse();
-    if let Cmd::Doctor = cli.cmd {
+    if let Cmd::Doctor { notify_test } = cli.cmd {
         doctor::run();
+        if notify_test {
+            println!(
+                "{}",
+                dayloop::notify::send(
+                    "toast",
+                    "dayloop の通知テストです。業務の状態は変更していません。"
+                )?
+                .log_line()
+            );
+        }
         return Ok(0);
     }
     if let Cmd::Where = cli.cmd {
         println!("{}", paths::data_dir().display());
         return Ok(0);
     }
-    if let Cmd::Mcp = cli.cmd {
-        mcp::run()?;
+    if let Cmd::Mcp { profile } = cli.cmd {
+        mcp::run_with_profile(profile)?;
         return Ok(0);
     }
-    if let Cmd::Serve { quiet } = cli.cmd {
+    if let Cmd::Serve { quiet, data_dir } = cli.cmd {
+        if let Some(dir) = data_dir {
+            if !dir.is_absolute() {
+                anyhow::bail!("--data-dir は絶対パスで指定してください");
+            }
+            std::env::set_var("DAYLOOP_HOME", dir);
+        }
         serve::run(quiet)?;
         return Ok(0);
     }
@@ -285,10 +394,105 @@ fn run() -> Result<i32> {
     let ui = Ui::new(cli.yes);
 
     let code = match cli.cmd {
+        Cmd::Setup => {
+            config::init()?;
+            println!("データ: {}", store.data_dir().display());
+            println!(
+                "必須確認: {}",
+                store
+                    .required_categories()?
+                    .iter()
+                    .map(|c| c.label_ja())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            );
+            println!("接続は個別に設定します。次に dayloop plan を実行してください。");
+            0
+        }
+        Cmd::Reviews(sub) => {
+            let (name, args) = match sub {
+                ReviewCmd::List { date } => (
+                    "list_reviews",
+                    serde_json::json!({"date":resolve_date(date.as_deref())?}),
+                ),
+                ReviewCmd::Record {
+                    category,
+                    outcome,
+                    date,
+                    reason,
+                    task_id,
+                    candidate_id,
+                } => {
+                    let mut a = serde_json::json!({"date":resolve_date(date.as_deref())?,"category":category,"outcome":outcome});
+                    for (key, value) in [
+                        ("reason", reason),
+                        ("task_id", task_id),
+                        ("candidate_id", candidate_id),
+                    ] {
+                        if let Some(v) = value {
+                            a[key] = serde_json::json!(v);
+                        }
+                    }
+                    ("record_review", a)
+                }
+                ReviewCmd::Configure {
+                    categories,
+                    none: _,
+                } => (
+                    "configure_reviews",
+                    serde_json::json!({"categories":categories}),
+                ),
+            };
+            print_tool(&store, name, args)?
+        }
+        Cmd::Routines(sub) => {
+            let (name, args) = match sub {
+                RoutineCmd::List => ("list_routines", serde_json::json!({})),
+                RoutineCmd::Add {
+                    title,
+                    weekdays,
+                    starts_on,
+                } => (
+                    "add_routine",
+                    serde_json::json!({"title":title,"weekdays":weekdays,"starts_on":starts_on}),
+                ),
+                RoutineCmd::Enable { id } => (
+                    "set_routine_enabled",
+                    serde_json::json!({"id":id,"enabled":true}),
+                ),
+                RoutineCmd::Disable { id } => (
+                    "set_routine_enabled",
+                    serde_json::json!({"id":id,"enabled":false}),
+                ),
+            };
+            print_tool(&store, name, args)?
+        }
+        Cmd::Note {
+            category,
+            title,
+            body,
+            file,
+            source_ref,
+            meeting_id,
+        } => {
+            let body = match (body, file) {
+                (Some(s), _) => s,
+                (_, Some(p)) => std::fs::read_to_string(p)?,
+                _ => anyhow::bail!("--body または --file が必要です"),
+            };
+            let mut args = serde_json::json!({"category":category,"title":title,"body":body});
+            if let Some(v) = source_ref {
+                args["source_ref"] = serde_json::json!(v);
+            }
+            if let Some(v) = meeting_id {
+                args["meeting_id"] = serde_json::json!(v);
+            }
+            print_tool(&store, "ingest_note", args)?
+        }
         Cmd::Reopen { date, reason } => {
             let d = resolve_date(date.as_deref())?;
             store.reopen_day(&d, &reason)?;
-            markdown::export(&store, &d)?;
+            warn_mirror(&store, &d);
             println!("{d} を再開しました。タスクの結果は保持されています。");
             0
         }
@@ -347,6 +551,7 @@ fn run() -> Result<i32> {
         }
         Cmd::Today { date } => {
             let d = resolve_date(date.as_deref())?;
+            store.prepare_day(&d)?;
             rituals::print_day(&store, &d)?;
             0
         }
@@ -380,20 +585,20 @@ fn run() -> Result<i32> {
                 t.state.label_ja()
             );
             if let Some(d) = plan {
-                markdown::export(&store, &d)?;
+                warn_mirror(&store, &d);
             }
             0
         }
         Cmd::Plan { date } => {
             let d = resolve_date(date.as_deref())?;
             let o = rituals::plan_ritual(&store, &ui, &d)?;
-            markdown::export(&store, &d)?;
+            warn_mirror(&store, &d);
             finish(o)
         }
         Cmd::Check { date } => {
             let d = resolve_date(date.as_deref())?;
             let o = rituals::check_ritual(&store, &ui, &d)?;
-            markdown::export(&store, &d)?;
+            warn_mirror(&store, &d);
             finish(o)
         }
         Cmd::Start { id, date } => {
@@ -475,17 +680,24 @@ fn run() -> Result<i32> {
                 println!("  {}  {}", short(&n.id), n.title);
             }
             export_for(&store, &old)?;
-            markdown::export(&store, &to)?;
+            warn_mirror(&store, &to);
             0
         }
         Cmd::Close { date } => {
             let d = resolve_date(date.as_deref())?;
             let o = rituals::close_ritual(&store, &ui, &d)?;
-            markdown::export(&store, &d)?;
+            warn_mirror(&store, &d);
             finish(o)
         }
-        Cmd::Retro { date } => {
+        Cmd::Retro { date, note } => {
             let d = resolve_date(date.as_deref())?;
+            if let Some(note) = note {
+                return print_tool(
+                    &store,
+                    "save_retro",
+                    serde_json::json!({"date":d,"note":note}),
+                );
+            }
             finish(rituals::retro_ritual(&store, &ui, &d)?)
         }
         Cmd::Candidates(c) => match c {
@@ -553,7 +765,7 @@ fn run() -> Result<i32> {
             let d = resolve_date(date.as_deref())?;
             let r = markdown::import(&store, &d)?;
             println!("取り込み: 完了 {} 件、新規 {} 件", r.completed, r.added);
-            markdown::export(&store, &d)?;
+            warn_mirror(&store, &d);
             0
         }
         Cmd::Intake(sub) => match sub {
@@ -570,9 +782,9 @@ fn run() -> Result<i32> {
                 0
             }
         },
-        Cmd::Doctor
+        Cmd::Doctor { .. }
         | Cmd::Where
-        | Cmd::Mcp
+        | Cmd::Mcp { .. }
         | Cmd::Serve { .. }
         | Cmd::Startup(_)
         | Cmd::Config(_) => unreachable!(),
@@ -580,9 +792,15 @@ fn run() -> Result<i32> {
     Ok(code)
 }
 
+fn warn_mirror(store: &Store, date: &str) {
+    if markdown::export(store, date).is_err() {
+        eprintln!("注意: 台帳への操作は反映されていますが、{date} のMarkdown出力に失敗しました。権限・ファイルのロックを確認し、exportを再実行してください。");
+    }
+}
+
 fn export_for(store: &Store, t: &model::Task) -> Result<()> {
     if let Some(d) = &t.plan_date {
-        markdown::export(store, d)?;
+        warn_mirror(store, d);
     }
     Ok(())
 }

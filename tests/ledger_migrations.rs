@@ -135,6 +135,7 @@ fn incompatible_legacy_tables_are_refused_instead_of_reinterpreted() {
 fn reopen_is_audited_and_never_rewrites_completed_task_outcomes() {
     let home = Home::new();
     let store = Store::open_at(home.db()).unwrap();
+    store.set_required_categories(&[]).unwrap();
     let task = store
         .add_task("done", None, None, "manual", None, Some("2026-09-05"))
         .unwrap();

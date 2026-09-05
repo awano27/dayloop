@@ -22,7 +22,9 @@ impl Home {
         }
     }
     fn store(&self) -> Store {
-        Store::open().unwrap()
+        let store = Store::open_at(self.path.join("dayloop.db")).unwrap();
+        store.set_required_categories(&[]).unwrap(); // Business reviews have separate coverage.
+        store
     }
 }
 impl Drop for Home {

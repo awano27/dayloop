@@ -10,6 +10,35 @@ pub struct OutlookCom {
     read_body: bool,
 }
 
+#[cfg(any(windows, test))]
+fn checked_count(count: i32) -> Result<i32> {
+    if !(0..=500).contains(&count) {
+        bail!("source result is invalid or exceeds the 500 item safety limit; narrow the requested scope");
+    }
+    Ok(count)
+}
+
+#[cfg(any(windows, test))]
+fn checked_serial(value: f64) -> Result<f64> {
+    if !value.is_finite() || !(-657434.0..2958466.0).contains(&value) {
+        bail!("invalid Outlook date");
+    }
+    Ok(value)
+}
+
+#[cfg(windows)]
+fn is_no_object(value: &windows::core::VARIANT) -> bool {
+    // GetFirst/GetNext returns Nothing at end of enumeration. Other conversion
+    // failures remain errors rather than being mistaken for the end.
+    unsafe {
+        let raw = value.as_raw();
+        let vt = raw.Anonymous.Anonymous.vt;
+        vt == 0
+            || vt == 1
+            || ((vt == 9 || vt == 13) && raw.Anonymous.Anonymous.Anonymous.pdispVal.is_null())
+    }
+}
+
 impl OutlookCom {
     pub fn new(read_body: bool) -> Self {
         Self { read_body }
@@ -69,7 +98,10 @@ pub fn probe_version() -> Result<String> {
 }
 
 #[cfg(windows)]
-fn com_timeout<T: Send + 'static>(secs: u64, f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+fn com_timeout<T: Send + 'static>(
+    secs: u64,
+    f: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(f());
@@ -88,50 +120,50 @@ fn fetch_mails(since: DateTime<Local>, read_body: bool) -> Result<Vec<MailItem>>
             bail!("new_outlook_or_missing: Outlook.Application がありません。新しい Outlook か未インストール。段階4の Edge 経由になります")
         }
     };
-    let ns_v = com::call(&app, "GetNamespace", &[com::var_bstr("MAPI")])
-        .map_err(|_| anyhow!("new_outlook_or_missing: GetNamespace に失敗。段階4の Edge 経由になります"))?;
+    let ns_v = com::call(&app, "GetNamespace", &[com::var_bstr("MAPI")]).map_err(|_| {
+        anyhow!("new_outlook_or_missing: GetNamespace に失敗。段階4の Edge 経由になります")
+    })?;
     let ns = com::as_dispatch(&ns_v)?;
     let folder_v = com::call(&ns, "GetDefaultFolder", &[com::var_i32(6)])?;
     let folder = com::as_dispatch(&folder_v)?;
     let items_v = com::get(&folder, "Items")?;
     let items = com::as_dispatch(&items_v)?;
-    let _ = com::call(
+    com::call(
         &items,
         "Sort",
         &[com::var_bstr("[ReceivedTime]"), com::var_bool(true)],
-    );
+    )?;
     let since_s = since.format("%Y/%m/%d %H:%M").to_string();
     let restrict = format!("[ReceivedTime] >= '{since_s}'");
-    let filtered_v = com::call(&items, "Restrict", &[com::var_bstr(&restrict)]).unwrap_or(items_v);
-    let filtered = com::as_dispatch(&filtered_v).unwrap_or(items);
-    let count = com::as_i32(&com::get(&filtered, "Count")?).unwrap_or(0);
-    let n = count.min(500);
+    let filtered_v = com::call(&items, "Restrict", &[com::var_bstr(&restrict)])?;
+    let filtered = com::as_dispatch(&filtered_v)?;
+    let n = checked_count(com::as_i32(&com::get(&filtered, "Count")?)?)?;
     let mut out = Vec::new();
     for i in 1..=n {
-        let item_v = match com::call(&filtered, "Item", &[com::var_i32(i)]) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let item = match com::as_dispatch(&item_v) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let entry_id = com::as_string(&com::get(&item, "EntryID")?).unwrap_or_default();
+        let item_v = com::call(&filtered, "Item", &[com::var_i32(i)])?;
+        let item = com::as_dispatch(&item_v)?;
+        let entry_id = com::as_string(&com::get(&item, "EntryID")?)?;
         if entry_id.is_empty() {
+            bail!("mail entry id is missing");
+        }
+        let subject = com::as_string(&com::get(&item, "Subject")?)?;
+        let sender_name = com::as_string(&com::get(&item, "SenderName")?)?;
+        let received = checked_serial(com::as_f64(&com::get(&item, "ReceivedTime")?)?)?;
+        let received_at = com::date_serial_to_local(received);
+        if received_at < since {
             continue;
         }
-        let subject = com::as_string(&com::get(&item, "Subject")?).unwrap_or_default();
-        let sender_name = com::as_string(&com::get(&item, "SenderName")?).unwrap_or_default();
-        let received = com::as_f64(&com::get(&item, "ReceivedTime")?).unwrap_or(0.0);
-        let unread = com::as_bool(&com::get(&item, "UnRead")?).unwrap_or(false);
-        let flag_status = com::as_i32(&com::get(&item, "FlagStatus")?).unwrap_or(0);
+        let unread = com::as_bool(&com::get(&item, "UnRead")?)?;
+        let flag_status = com::as_i32(&com::get(&item, "FlagStatus")?)?;
         let flag_request = com::as_string(&com::get(&item, "FlagRequest")?).ok();
         let conversation_topic = com::as_string(&com::get(&item, "ConversationTopic")?).ok();
         let body_excerpt = if read_body {
-            com::get(&item, "Body")
-                .ok()
-                .and_then(|v| com::as_string(&v).ok())
-                .map(|s: String| s.chars().take(2000).collect())
+            Some(
+                com::as_string(&com::get(&item, "Body")?)?
+                    .chars()
+                    .take(2000)
+                    .collect(),
+            )
         } else {
             None
         };
@@ -139,7 +171,7 @@ fn fetch_mails(since: DateTime<Local>, read_body: bool) -> Result<Vec<MailItem>>
             entry_id,
             subject,
             sender_name,
-            received_at: com::date_serial_to_local(received),
+            received_at,
             unread,
             flagged: flag_status != 0,
             flag_request: flag_request.filter(|s| !s.is_empty()),
@@ -160,51 +192,66 @@ fn fetch_events(from: NaiveDate, to: NaiveDate) -> Result<Vec<CalendarItem>> {
             bail!("new_outlook_or_missing: Outlook.Application がありません。新しい Outlook か未インストール。段階4の Edge 経由になります")
         }
     };
-    let ns_v = com::call(&app, "GetNamespace", &[com::var_bstr("MAPI")])
-        .map_err(|_| anyhow!("new_outlook_or_missing: GetNamespace に失敗。段階4の Edge 経由になります"))?;
+    let ns_v = com::call(&app, "GetNamespace", &[com::var_bstr("MAPI")]).map_err(|_| {
+        anyhow!("new_outlook_or_missing: GetNamespace に失敗。段階4の Edge 経由になります")
+    })?;
     let ns = com::as_dispatch(&ns_v)?;
-    let me = com::as_string(&com::get(&com::as_dispatch(&com::get(&ns, "CurrentUser")?)?, "Name")?).unwrap_or_default();
+    let me = com::as_string(&com::get(
+        &com::as_dispatch(&com::get(&ns, "CurrentUser")?)?,
+        "Name",
+    )?)
+    .unwrap_or_default();
     let folder_v = com::call(&ns, "GetDefaultFolder", &[com::var_i32(9)])?;
     let folder = com::as_dispatch(&folder_v)?;
     let items_v = com::get(&folder, "Items")?;
     let items = com::as_dispatch(&items_v)?;
-    let _ = com::put(&items, "IncludeRecurrences", com::var_bool(true));
-    let _ = com::call(&items, "Sort", &[com::var_bstr("[Start]")]);
+    com::call(&items, "Sort", &[com::var_bstr("[Start]")])?;
+    com::put(&items, "IncludeRecurrences", com::var_bool(true))?;
     let from_s = from.format("%Y/%m/%d 00:00").to_string();
-    let to_s = (to + chrono::Duration::days(1)).format("%Y/%m/%d 00:00").to_string();
-    let restrict = format!("[Start] >= '{from_s}' AND [End] <= '{to_s}'");
-    let filtered_v = com::call(&items, "Restrict", &[com::var_bstr(&restrict)]).unwrap_or(items_v);
-    let filtered = com::as_dispatch(&filtered_v).unwrap_or(items);
-    let count = com::as_i32(&com::get(&filtered, "Count")?).unwrap_or(0);
-    let n = count.min(500);
+    let to_s = (to + chrono::Duration::days(1))
+        .format("%Y/%m/%d 00:00")
+        .to_string();
+    let restrict = format!("[Start] >= '{from_s}' AND [Start] < '{to_s}'");
+    let filtered_v = com::call(&items, "Restrict", &[com::var_bstr(&restrict)])?;
+    let filtered = com::as_dispatch(&filtered_v)?;
+    // Count is undefined for IncludeRecurrences. Enumerate until a null object,
+    // and fail rather than silently truncate when the bounded window is too large.
     let mut out = Vec::new();
-    for i in 1..=n {
-        let item_v = match com::call(&filtered, "Item", &[com::var_i32(i)]) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let item = match com::as_dispatch(&item_v) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let entry_id = com::as_string(&com::get(&item, "EntryID")?).unwrap_or_default();
+    for i in 0..=500 {
+        let item_v = com::call(&filtered, if i == 0 { "GetFirst" } else { "GetNext" }, &[])?;
+        if is_no_object(&item_v) {
+            break;
+        }
+        if i == 500 {
+            bail!("calendar exceeds the 500 item safety limit");
+        }
+        let item = com::as_dispatch(&item_v)?;
+        let entry_id = com::as_string(&com::get(&item, "EntryID")?)?;
         if entry_id.is_empty() {
+            bail!("calendar entry id is missing");
+        }
+        let subject = com::as_string(&com::get(&item, "Subject")?)?;
+        let start =
+            com::date_serial_to_local(checked_serial(com::as_f64(&com::get(&item, "Start")?)?)?);
+        let end =
+            com::date_serial_to_local(checked_serial(com::as_f64(&com::get(&item, "End")?)?)?);
+        if start.date_naive() < from || start.date_naive() > to {
             continue;
         }
-        let subject = com::as_string(&com::get(&item, "Subject")?).unwrap_or_default();
-        let start = com::as_f64(&com::get(&item, "Start")?).unwrap_or(0.0);
-        let end = com::as_f64(&com::get(&item, "End")?).unwrap_or(0.0);
+        if end < start {
+            bail!("calendar end precedes start");
+        }
         let location = com::as_string(&com::get(&item, "Location")?).ok();
         let organizer = com::as_string(&com::get(&item, "Organizer")?).ok();
-        let response_required = com::as_bool(&com::get(&item, "ResponseRequested")?).unwrap_or(false);
-        let all_day = com::as_bool(&com::get(&item, "AllDayEvent")?).unwrap_or(false);
-        let meeting_status = com::as_i32(&com::get(&item, "MeetingStatus")?).unwrap_or(0);
+        let response_required = com::as_bool(&com::get(&item, "ResponseRequested")?)?;
+        let all_day = com::as_bool(&com::get(&item, "AllDayEvent")?)?;
+        let meeting_status = com::as_i32(&com::get(&item, "MeetingStatus")?)?;
         let is_organizer = meeting_status == 1 && organizer.as_deref() == Some(me.as_str());
         out.push(CalendarItem {
             entry_id,
             subject,
-            start: com::date_serial_to_local(start),
-            end: com::date_serial_to_local(end),
+            start,
+            end,
             location: location.filter(|s| !s.is_empty()),
             organizer,
             is_organizer,
@@ -213,4 +260,20 @@ fn fetch_events(from: NaiveDate, to: NaiveDate) -> Result<Vec<CalendarItem>> {
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn unsafe_counts_and_dates_fail_instead_of_claiming_empty_or_complete_results() {
+        assert_eq!(checked_count(0).unwrap(), 0);
+        assert_eq!(checked_count(500).unwrap(), 500);
+        assert!(checked_count(-1).is_err());
+        assert!(checked_count(501).is_err());
+        assert!(checked_serial(f64::NAN).is_err());
+        assert!(checked_serial(f64::INFINITY).is_err());
+        assert!(checked_serial(1e30).is_err());
+        assert!(checked_serial(46000.5).is_ok());
+    }
 }

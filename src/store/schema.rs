@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::path::Path;
 
-pub(super) const VERSION: i64 = 1;
+pub(super) const VERSION: i64 = 2;
 
 const AUDIT: &str = "CREATE TABLE IF NOT EXISTS ledger_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,6 +51,16 @@ pub(super) fn migrate(conn: &Connection, path: &Path, schema: &str) -> Result<()
     if locked_version < VERSION {
         tx.execute_batch(schema)?;
         tx.execute_batch(AUDIT)?;
+        if locked_version < 2 {
+            tx.execute_batch(
+                "INSERT OR IGNORE INTO required_categories(category) VALUES
+                    ('teams'),('outlook'),('attendance'),('tasks'),('alerts'),('meeting_prep'),('meeting_results');
+                 INSERT OR IGNORE INTO review_sets(date,prepared_at)
+                    SELECT date, 'migration-v2' FROM days
+                    UNION
+                    SELECT plan_date, 'migration-v2' FROM tasks WHERE plan_date IS NOT NULL;",
+            )?;
+        }
         tx.pragma_update(None, "user_version", VERSION)?;
     }
     tx.commit()?;
@@ -69,9 +79,10 @@ fn validate(conn: &Connection, tables: &[String], version: i64) -> Result<()> {
     if !tables.is_empty() && !tables.iter().any(|t| t == "tasks") {
         bail!("既知のdayloop台帳形式ではありません。変更せず終了します");
     }
-    let expected: &[(&str, &[&str])] = &[
+    let expected: &[(&str, i64, &[&str])] = &[
         (
             "tasks",
+            0,
             &[
                 "id",
                 "title",
@@ -91,10 +102,12 @@ fn validate(conn: &Connection, tables: &[String], version: i64) -> Result<()> {
         ),
         (
             "days",
+            1,
             &["date", "plan_confirmed_at", "closed_at", "retro_note"],
         ),
         (
             "candidates",
+            1,
             &[
                 "id",
                 "title",
@@ -105,13 +118,15 @@ fn validate(conn: &Connection, tables: &[String], version: i64) -> Result<()> {
                 "task_id",
             ],
         ),
-        ("rejected_refs", &["source_ref"]),
+        ("rejected_refs", 1, &["source_ref"]),
         (
             "ledger_audit",
+            1,
             &["id", "date", "action", "reason", "created_at"],
         ),
         (
             "events",
+            1,
             &[
                 "entry_id",
                 "date",
@@ -125,10 +140,70 @@ fn validate(conn: &Connection, tables: &[String], version: i64) -> Result<()> {
                 "synced_at",
             ],
         ),
+        ("required_categories", 2, &["category"]),
+        ("review_sets", 2, &["date", "prepared_at"]),
+        (
+            "reviews",
+            2,
+            &[
+                "id",
+                "date",
+                "category",
+                "required",
+                "outcome",
+                "reason",
+                "task_id",
+                "candidate_id",
+                "updated_at",
+            ],
+        ),
+        (
+            "fetch_reports",
+            2,
+            &[
+                "id",
+                "category",
+                "source",
+                "scope",
+                "status",
+                "item_count",
+                "started_at",
+                "finished_at",
+                "reason",
+            ],
+        ),
+        (
+            "observations",
+            2,
+            &[
+                "id",
+                "category",
+                "source_ref",
+                "meeting_id",
+                "title",
+                "body",
+                "observed_at",
+                "created_at",
+            ],
+        ),
+        ("source_observations", 2, &["source_ref", "observation_id"]),
+        (
+            "routines",
+            2,
+            &[
+                "id",
+                "title",
+                "weekdays",
+                "enabled",
+                "starts_on",
+                "created_at",
+            ],
+        ),
+        ("routine_occurrences", 2, &["routine_id", "date", "task_id"]),
     ];
-    for (table, columns) in expected {
+    for (table, introduced, columns) in expected {
         if !tables.iter().any(|t| t == table) {
-            if version == VERSION {
+            if !tables.is_empty() && version >= *introduced {
                 bail!("台帳の{table}テーブルがありません。自動修復せず終了します");
             }
             continue;
@@ -138,7 +213,9 @@ fn validate(conn: &Connection, tables: &[String], version: i64) -> Result<()> {
         let found: Vec<String> = stmt
             .query_map([], |r| r.get(1))?
             .collect::<rusqlite::Result<_>>()?;
-        if columns.iter().any(|c| !found.iter().any(|f| f == c)) {
+        if columns.iter().any(|c| !found.iter().any(|f| f == c))
+            || found.iter().any(|f| !columns.iter().any(|c| c == f))
+        {
             bail!("台帳の{table}テーブルが既知の形式と異なります。変更せず終了します");
         }
     }

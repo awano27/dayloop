@@ -13,7 +13,9 @@ impl Home {
         self.0.join("dayloop.db")
     }
     fn store(&self) -> Store {
-        Store::open_at(self.db()).unwrap()
+        let store = Store::open_at(self.db()).unwrap();
+        store.set_required_categories(&[]).unwrap();
+        store
     }
 }
 impl Drop for Home {
