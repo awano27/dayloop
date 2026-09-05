@@ -71,6 +71,7 @@ Begin once a tenant/test account and organization-approved environment are suppl
 - Initial checkout clean; feature branch created. Baseline: all 26 tests passed.
 - User subsequently requested push; scoped root commits/push are authorized, publication remains gated.
 - Task 1: implemented and reviewed. 24 new behavior tests plus 26 existing tests pass (50 total); Clippy and release build pass. Root incorporated review findings for empty unclosed days, strict state/ID decoding, structural read-only diagnosis and backup under the migration write lock. Release CLI/MCP smoke passed 15 assertions with isolated synthetic data. Reviewer accepted the final code. Remote CI will be checked for the pushed commit.
+- First remote CI passed Windows build/tests/smoke and Linux build/tests, but Rust 1.98 Clippy flagged two existing completion-rate divisions (local toolchain: 1.93). Both now use `checked_div` with the same zero-denominator behavior; the follow-up commit is subject to a fresh CI run.
 - Tasks 2–4: pending; this first development unit does not claim the seven-category workflow or beta release acceptance.
 - Tasks 5–6: follow-on after executable baseline.
 - Task 7: environment unavailable as explicitly confirmed by user.

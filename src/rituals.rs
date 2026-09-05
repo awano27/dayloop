@@ -435,8 +435,8 @@ pub fn retro_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     let decided = done + not_done + carried + dropped;
     println!("== 振り返り {from} 〜 {to}");
     println!("   予定 {}  完了 {done}  未完了 {not_done}  持ち越し {carried}  取り下げ {dropped}  未確定 {open}", tasks.len());
-    if decided > 0 {
-        println!("   完了率 {}%（確定した {decided} 件のうち）", done * 100 / decided);
+    if let Some(rate) = (done * 100).checked_div(decided) {
+        println!("   完了率 {rate}%（確定した {decided} 件のうち）");
     }
     println!();
     println!("   日付         予定  完了  未完了  持越  取下");

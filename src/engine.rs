@@ -268,7 +268,7 @@ pub fn retro_view(store: &Store, date: &str) -> Result<Value> {
     let dropped = count(State::Dropped);
     let open = tasks.iter().filter(|t| t.state.is_open()).count();
     let decided = done + not_done + carried + dropped;
-    let done_rate_pct = if decided > 0 { Some(done * 100 / decided) } else { None };
+    let done_rate_pct = (done * 100).checked_div(decided);
 
     let mut by_day = Vec::new();
     let mut d = crate::util::parse_date(&from)?;
