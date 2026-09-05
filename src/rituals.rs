@@ -133,6 +133,20 @@ pub fn print_day(store: &Store, date: &str) -> Result<()> {
         ),
         _ => println!("   計画未確定 / 未確定 {open} 件"),
     }
+    let events = store.events_for_day(date)?;
+    if !events.is_empty() {
+        println!("   [今日の予定]");
+        for e in &events {
+            let loc = e.location.as_deref().map(|l| format!("  {l}")).unwrap_or_default();
+            println!(
+                "     {}-{}  {}{}",
+                hhmm(&e.start),
+                hhmm(&e.end),
+                e.subject,
+                loc
+            );
+        }
+    }
     if tasks.is_empty() {
         println!("   タスクなし");
     }

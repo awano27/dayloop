@@ -72,7 +72,30 @@ dayloop startup status
 dayloop startup remove
 ```
 
-既定の時刻は plan 08:30 / check 13:00 / close 18:00 / retro `Fri 18:30`、平日のみ。回答が必要ならトースト（失敗時は `notify.txt`）を出し、`serve.log` に残します。PC が寝ていて時刻を過ぎていた場合は、復帰後の最初のチェックで未実行フェーズを1回ずつ実行します。
+既定の時刻は plan 08:30 / check 13:00 / close 18:00 / retro `Fri 18:30`、平日のみ。回答が必要ならトースト（失敗時は `notify.txt`）を出し、`serve.log` に残します。PC が寝ていて時刻を過ぎていた場合は、復帰後の最初のチェックで未実行フェーズを1回ずつ実行します。plan / check の直前に Outlook 取り込みを試み、失敗はログだけです。
+
+## 取り込み（Outlook）
+
+```bash
+dayloop intake outlook              # COM で受信トレイ・予定表を読む
+dayloop intake outlook --since 3d --dry-run
+dayloop intake fixture fixtures/outlook   # デモ用 JSON
+```
+
+クラシック Outlook が入っていれば管理者権限なしで Candidate と当日の予定に流れます。新しい Outlook（olk.exe）や未インストールでは 1 行メッセージで終了コード 0 です。本文・メールアドレスは既定で読みません。
+
+`config.toml` の `[intake]`:
+
+```toml
+[intake]
+outlook = true
+lookback_days = 3
+read_body = false
+keywords = ["お願い", "ご確認", "please"]
+important_senders = []
+meeting_prep = true
+meeting_prep_only_required = true
+```
 
 ## Markdown
 
@@ -97,4 +120,4 @@ cargo build --release
 
 ## ロードマップ
 
-仕様は [../dayloop-spec.md](../dayloop-spec.md)。段階2 まで（CLI + MCP + 常駐）。以降は Outlook COM 取り込み、VS Code 拡張版、会議・アラート・勤怠、M365 Copilot 接続の順に入口を増やします。
+仕様は [../dayloop-spec.md](../dayloop-spec.md)。段階3 まで（CLI + MCP + 常駐 + Outlook COM 取り込み）。以降は VS Code 拡張版、会議・アラート・勤怠、M365 Copilot 接続の順に入口を増やします。

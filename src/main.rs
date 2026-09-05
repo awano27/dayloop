@@ -153,6 +153,26 @@ enum Cmd {
     /// 設定ファイル
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// 外部ソースから Candidate / 予定を取り込む
+    #[command(subcommand)]
+    Intake(IntakeCmd),
+}
+
+#[derive(Subcommand)]
+enum IntakeCmd {
+    /// Outlook デスクトップ（COM）からメール・予定を読む
+    Outlook {
+        /// 例: 3d （既定は config の lookback_days）
+        #[arg(long)]
+        since: Option<String>,
+        /// 保存せず抽出結果を表示
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// フィクスチャ JSON を同じパイプラインに流す
+    Fixture {
+        dir: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -392,6 +412,20 @@ fn run() -> Result<i32> {
             markdown::export(&store, &d)?;
             0
         }
+        Cmd::Intake(sub) => match sub {
+            IntakeCmd::Outlook { since, dry_run } => {
+                let cfg = config::load();
+                let r = dayloop::intake::run_outlook(&store, &cfg, since.as_deref(), dry_run);
+                println!("{}", r.summary_line());
+                0
+            }
+            IntakeCmd::Fixture { dir } => {
+                let cfg = config::load();
+                let r = dayloop::intake::run_fixture(&store, &dir, &cfg)?;
+                println!("{}", r.summary_line());
+                0
+            }
+        },
         Cmd::Doctor
         | Cmd::Where
         | Cmd::Mcp

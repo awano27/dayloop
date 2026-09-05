@@ -27,6 +27,7 @@ const REQUIRED_TOOLS: &[&str] = &[
     "reject_candidate",
     "export_markdown",
     "import_markdown",
+    "sync_sources",
 ];
 
 fn frame(v: &Value) -> Vec<u8> {
@@ -440,6 +441,71 @@ fn mcp_close_day_options_are_structured() {
             }
         }
     }
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn mcp_sync_sources_partial_failure_is_not_error() {
+    let home = std::env::temp_dir().join(format!(
+        "dayloop-mcp-sync-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dayloop"))
+        .arg("mcp")
+        .env("DAYLOOP_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    stdin
+        .write_all(&frame(&json!({
+            "jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}
+        })))
+        .unwrap();
+    stdin
+        .write_all(&frame(&json!({"jsonrpc":"2.0","method":"notifications/initialized"})))
+        .unwrap();
+    stdin
+        .write_all(&frame(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})))
+        .unwrap();
+    stdin
+        .write_all(&frame(&json!({
+            "jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"sync_sources","arguments":{}}
+        })))
+        .unwrap();
+    drop(stdin);
+    let mut buf = Vec::new();
+    stdout.read_to_end(&mut buf).ok();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_ndjson(&buf);
+    let frames = parse_frames(&buf);
+    let names: Vec<&str> = frames[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(names.contains(&"sync_sources"));
+    assert_eq!(frames[2]["result"]["isError"], false);
+    let body = tool_text(&frames[2]);
+    assert!(body.get("sources").is_some(), "{body}");
+    let src0 = &body["sources"][0];
+    assert_eq!(src0["name"], "outlook");
+    assert_eq!(src0["ok"], false);
+    assert!(!body["errors"].as_array().unwrap().is_empty());
 
     let _ = std::fs::remove_dir_all(&home);
 }

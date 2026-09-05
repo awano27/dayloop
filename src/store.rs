@@ -3,7 +3,7 @@ use std::fmt;
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
-use crate::model::{Candidate, Day, State, Task};
+use crate::model::{Candidate, Day, Event, State, Task};
 use crate::paths;
 use crate::util::now;
 
@@ -48,6 +48,19 @@ CREATE TABLE IF NOT EXISTS candidates (
 CREATE TABLE IF NOT EXISTS rejected_refs (
   source_ref TEXT PRIMARY KEY
 );
+CREATE TABLE IF NOT EXISTS events (
+  entry_id TEXT PRIMARY KEY,
+  date TEXT NOT NULL,
+  start TEXT NOT NULL,
+  end TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  location TEXT,
+  organizer TEXT,
+  is_organizer INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL,
+  synced_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_date ON events(date);
 "#;
 
 const TASK_COLS: &str = "id,title,source,source_ref,due,estimate_min,plan_date,state,state_reason,carried_count,evidence,created_at,closed_at";
@@ -495,5 +508,55 @@ impl Store {
             self.conn.execute("INSERT OR IGNORE INTO rejected_refs(source_ref) VALUES(?1)", params![r])?;
         }
         Ok(())
+    }
+
+    // ---------- events ----------
+
+    /// Replace all events for `date` with `events` (empty clears that day).
+    pub fn upsert_events(&self, date: &str, events: Vec<Event>) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM events WHERE date=?1", params![date])?;
+        for e in &events {
+            tx.execute(
+                "INSERT OR REPLACE INTO events(entry_id,date,start,end,subject,location,organizer,is_organizer,source,synced_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![
+                    e.entry_id,
+                    date,
+                    e.start,
+                    e.end,
+                    e.subject,
+                    e.location,
+                    e.organizer,
+                    e.is_organizer as i64,
+                    e.source,
+                    e.synced_at
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn events_for_day(&self, date: &str) -> Result<Vec<Event>> {
+        let mut st = self.conn.prepare(
+            "SELECT entry_id,date,start,end,subject,location,organizer,is_organizer,source,synced_at
+             FROM events WHERE date=?1 ORDER BY start",
+        )?;
+        let rows = st.query_map(params![date], |r| {
+            Ok(Event {
+                entry_id: r.get(0)?,
+                date: r.get(1)?,
+                start: r.get(2)?,
+                end: r.get(3)?,
+                subject: r.get(4)?,
+                location: r.get(5)?,
+                organizer: r.get(6)?,
+                is_organizer: r.get::<_, i64>(7)? != 0,
+                source: r.get(8)?,
+                synced_at: r.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }

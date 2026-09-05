@@ -96,21 +96,24 @@ pub fn run() {
             ok("アプリ制御ポリシー", "設定なし");
         }
 
-        // Outlook desktop COM
-        let outlook_com = reg_exists(r"HKCR\Outlook.Application")
-            || reg_exists(r"HKCU\Software\Classes\Outlook.Application");
+        // Outlook desktop COM: actually create Outlook.Application and read Version.
         let new_outlook = local.join(r"Microsoft\WindowsApps\olk.exe").exists();
-        if outlook_com {
-            ok("Outlook デスクトップ (COM)", "メール・予定を管理者権限なしで読めます");
-        } else {
-            ng(
-                "Outlook デスクトップ (COM)",
-                "見つかりません",
-                "メール・予定は Graph API か Edge 経由になります（段階4以降）",
-            );
+        match crate::intake::outlook_com::probe_version() {
+            Ok(ver) => ok("Outlook COM", &format!("バージョン {ver}")),
+            Err(e) => ng(
+                "Outlook COM",
+                &e.to_string(),
+                "メール・予定は段階4の Edge 経由になります",
+            ),
         }
         if new_outlook {
             info("新しい Outlook", "検出。COM が使えない場合は Edge 経由に切り替えます");
+        }
+        if crate::config::load().intake.read_body {
+            info(
+                "intake.read_body",
+                "true: 本文を読むため、Outlook のオブジェクトモデルガードが出る可能性があります",
+            );
         }
 
         // Edge

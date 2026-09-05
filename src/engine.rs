@@ -185,10 +185,12 @@ pub fn today_view(store: &Store, date: &str) -> Result<Value> {
     let tasks = store.tasks_for_day(date)?;
     let cands = store.open_candidates()?;
     let unclosed = store.unclosed_days_before(date)?;
+    let events = store.events_for_day(date)?;
     Ok(json!({
         "date": date,
         "day": day,
         "tasks": tasks,
+        "events": events,
         "open_candidate_count": cands.len(),
         "unclosed_days": unclosed,
     }))
@@ -221,12 +223,14 @@ pub fn plan_view(store: &Store, date: &str) -> Result<Value> {
     let n_open = store.open_tasks_for_day(date)?.len();
     questions.push(Question::confirm_plan(date, n_open));
 
+    let events = store.events_for_day(date)?;
     Ok(json!({
         "date": date,
         "unclosed_days": unclosed_out,
         "candidates": cands.iter().map(candidate_json).collect::<Vec<_>>(),
         "backlog": backlog,
         "planned": planned,
+        "events": events,
         "questions": questions,
     }))
 }

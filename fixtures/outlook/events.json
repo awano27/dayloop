@@ -1,0 +1,24 @@
+[
+  {
+    "entry_id": "cal-prep",
+    "subject": "週次定例",
+    "start_offset_minutes": 120,
+    "duration_minutes": 60,
+    "location": "会議室A",
+    "organizer": "自分",
+    "is_organizer": true,
+    "response_required": true,
+    "all_day": false
+  },
+  {
+    "entry_id": "cal-later",
+    "subject": "来月キックオフ",
+    "start_offset_minutes": 1560,
+    "duration_minutes": 60,
+    "location": "オンライン",
+    "organizer": "先方",
+    "is_organizer": false,
+    "response_required": false,
+    "all_day": false
+  }
+]

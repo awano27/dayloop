@@ -31,6 +31,7 @@ pub fn list() -> Vec<Value> {
         tool("reject_candidate", "候補を却下する。同じ source_ref は再提示されない。", obj(&[("id", str_id())], &["id"])),
         tool("export_markdown", "指定日の Markdown を書き出し、パスを返す。", obj(&[("date", str_date())], &[])),
         tool("import_markdown", "指定日の Markdown の手編集を取り込む。[x] は完了、新しい - [ ] は追加。", obj(&[("date", str_date())], &[])),
+        tool("sync_sources", "有効な取り込みアダプタを実行する。Outlook が無い環境でも部分失敗を返し、isError にはしない。", obj(&[], &[])),
     ]
 }
 
@@ -222,6 +223,10 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
             let r = markdown::import(store, &d)?;
             markdown::export(store, &d)?;
             Ok(json!({ "completed": r.completed, "added": r.added }))
+        }
+        "sync_sources" => {
+            let cfg = crate::config::load();
+            Ok(crate::intake::sync_all_json(store, &cfg))
         }
         _ => anyhow::bail!("unknown tool: {name}"),
     }

@@ -102,3 +102,17 @@ pub struct Candidate {
     pub created_at: String,
     pub status: String,
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Event {
+    pub entry_id: String,
+    pub date: String,
+    pub start: String,
+    pub end: String,
+    pub subject: String,
+    pub location: Option<String>,
+    pub organizer: Option<String>,
+    pub is_organizer: bool,
+    pub source: String,
+    pub synced_at: String,
+}

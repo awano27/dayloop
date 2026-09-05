@@ -1,6 +1,9 @@
+#[cfg(windows)]
+pub mod com;
 pub mod config;
 pub mod doctor;
 pub mod engine;
+pub mod intake;
 pub mod markdown;
 pub mod mcp;
 pub mod model;

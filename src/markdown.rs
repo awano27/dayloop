@@ -16,6 +16,22 @@ pub fn export(store: &Store, date: &str) -> Result<std::path::PathBuf> {
     out.push_str("<!-- dayloop: 手で編集できます。[x] を付けた行は `dayloop import` で完了になります。\n");
     out.push_str("     「今日のタスク」に `- [ ] 新しい行` を足すと新規タスクになります。 -->\n\n");
 
+    let events = store.events_for_day(date)?;
+    if !events.is_empty() {
+        out.push_str("## 今日の予定\n");
+        for e in &events {
+            let loc = e.location.as_deref().map(|l| format!("（{l}）")).unwrap_or_default();
+            out.push_str(&format!(
+                "- {}-{} {}{}\n",
+                hhmm(&e.start),
+                hhmm(&e.end),
+                e.subject,
+                loc
+            ));
+        }
+        out.push('\n');
+    }
+
     out.push_str("## 今日のタスク\n");
     let open: Vec<_> = tasks.iter().filter(|t| t.state.is_open()).collect();
     let done: Vec<_> = tasks.iter().filter(|t| t.state == State::Done).collect();

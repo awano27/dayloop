@@ -12,6 +12,15 @@ workdays = ["Mon","Tue","Wed","Thu","Fri"]
 
 [notify]
 method = "toast"   # toast | file | none
+
+[intake]
+outlook = true
+lookback_days = 3
+read_body = false
+keywords = ["お願い", "ご対応", "ご確認", "依頼", "までに", "締切", "期限", "至急", "回答", "deadline", "please", "action required", "ASAP"]
+important_senders = []
+meeting_prep = true
+meeting_prep_only_required = true
 "#;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -20,6 +29,40 @@ pub struct Config {
     pub schedule: Schedule,
     #[serde(default)]
     pub notify: Notify,
+    #[serde(default)]
+    pub intake: IntakeConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IntakeConfig {
+    #[serde(default = "default_outlook")]
+    pub outlook: bool,
+    #[serde(default = "default_lookback")]
+    pub lookback_days: i64,
+    #[serde(default)]
+    pub read_body: bool,
+    #[serde(default = "default_keywords")]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub important_senders: Vec<String>,
+    #[serde(default = "default_true")]
+    pub meeting_prep: bool,
+    #[serde(default = "default_true")]
+    pub meeting_prep_only_required: bool,
+}
+
+impl Default for IntakeConfig {
+    fn default() -> Self {
+        Self {
+            outlook: default_outlook(),
+            lookback_days: default_lookback(),
+            read_body: false,
+            keywords: default_keywords(),
+            important_senders: Vec::new(),
+            meeting_prep: true,
+            meeting_prep_only_required: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,6 +125,35 @@ fn default_workdays() -> Vec<String> {
 }
 fn default_method() -> String {
     "toast".into()
+}
+fn default_outlook() -> bool {
+    true
+}
+fn default_lookback() -> i64 {
+    3
+}
+fn default_true() -> bool {
+    true
+}
+fn default_keywords() -> Vec<String> {
+    [
+        "お願い",
+        "ご対応",
+        "ご確認",
+        "依頼",
+        "までに",
+        "締切",
+        "期限",
+        "至急",
+        "回答",
+        "deadline",
+        "please",
+        "action required",
+        "ASAP",
+    ]
+    .into_iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 pub fn load() -> Config {

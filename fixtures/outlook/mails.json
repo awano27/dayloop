@@ -1,0 +1,50 @@
+[
+  {
+    "entry_id": "mail-flagged",
+    "subject": "RE: 来週の資料",
+    "sender_name": "鈴木",
+    "received_at": "2026-09-01T09:00:00+09:00",
+    "unread": true,
+    "flagged": true
+  },
+  {
+    "entry_id": "mail-keyword",
+    "subject": "ご確認ください",
+    "sender_name": "佐藤",
+    "received_at": "2026-09-01T10:00:00+09:00",
+    "unread": true,
+    "flagged": false
+  },
+  {
+    "entry_id": "mail-important",
+    "subject": "報告書",
+    "sender_name": "田中部長",
+    "received_at": "2026-09-01T11:00:00+09:00",
+    "unread": true,
+    "flagged": false
+  },
+  {
+    "entry_id": "mail-miss-newsletter",
+    "subject": "週刊ニュース",
+    "sender_name": "配信ロボット",
+    "received_at": "2026-09-01T12:00:00+09:00",
+    "unread": true,
+    "flagged": false
+  },
+  {
+    "entry_id": "mail-miss-auto",
+    "subject": "自動応答",
+    "sender_name": "noreply",
+    "received_at": "2026-09-01T13:00:00+09:00",
+    "unread": false,
+    "flagged": false
+  },
+  {
+    "entry_id": "mail-miss-ad",
+    "subject": "キャンペーンのお知らせ",
+    "sender_name": "広告",
+    "received_at": "2026-09-01T14:00:00+09:00",
+    "unread": true,
+    "flagged": false
+  }
+]
