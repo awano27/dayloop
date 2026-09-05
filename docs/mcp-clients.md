@@ -2,7 +2,7 @@
 
 dayloop の MCP は stdio の改行区切り JSON-RPC です。stdout はプロトコル専用です。クライアントには `dayloop.exe` の絶対パスを指定し、`<exe>` を実際のパスへ置き換えます。dayloop 自身はトークンや API キーを要求しません。
 
-各クライアントで試すときは、そのクライアントの起動環境に、空の一意なフォルダを `DAYLOOP_HOME` として渡します。実ユーザーの台帳、外部サービス、認証情報を受入れ試験に使いません。
+各クライアントで試すときは、サーバー設定の `env.DAYLOOP_HOME` に空の一意なフォルダの絶対パスを指定します。下の `<you>` と `<test-id>` を実際の値に置き換えます。GUIを起動するシェルの環境変数に依存させず、実ユーザーの台帳、外部サービス、認証情報は受入れ試験に使いません。
 
 ## ローカル LM Studio
 
@@ -13,13 +13,18 @@ LM Studio は `mcp.json` に stdio サーバーを追加できます。公式の
   "mcpServers": {
     "dayloop": {
       "command": "C:\\Users\\<you>\\dayloop\\dayloop.exe",
-      "args": ["mcp", "--profile", "local"]
+      "args": ["mcp", "--profile", "local"],
+      "env": {
+        "DAYLOOP_HOME": "C:\\Users\\<you>\\dayloop-evaluation\\<test-id>"
+      }
     }
   }
 }
 ```
 
 この例は LM Studio の設定を自動変更しません。クライアント側で内容を確認して保存します。LM Studio の API 設定や認証は LM Studio 側の機能であり、dayloop の stdio 接続やホスト認証を意味しません。
+
+2026-09-05のLM Studio 0.4.16で、この `env` 指定により専用フォルダへ台帳が作られ、MCPのツール提供元が登録されることを確認しました。実チャットでの日次完走は未確認です。[受入れ実施記録](acceptance-20260905.md)を参照してください。
 
 ## VS Code / GitHub Copilot
 
@@ -31,7 +36,10 @@ VS Code のローカル stdio サーバーは、ワークスペースの `.vscod
     "dayloop": {
       "type": "stdio",
       "command": "C:\\Users\\<you>\\dayloop\\dayloop.exe",
-      "args": ["mcp", "--profile", "github-copilot"]
+      "args": ["mcp", "--profile", "github-copilot"],
+      "env": {
+        "DAYLOOP_HOME": "C:\\Users\\<you>\\dayloop-evaluation\\<test-id>"
+      }
     }
   }
 }

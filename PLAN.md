@@ -79,3 +79,10 @@ Begin once a tenant/test account and organization-approved environment are suppl
 - Remaining acceptance gates: real LM Studio / VS Code clients, real Outlook/services, a clean enterprise Windows machine, five working days of actual usage, signing/public distribution. Local automated checks do not replace these gates. The beta source is ready for scoped commit/push and exact-commit remote CI; package verification follows that source commit.
 - Tasks 5–6: follow-on after executable baseline.
 - Task 7: environment unavailable as explicitly confirmed by user.
+
+## Acceptance follow-up — 2026-09-05
+
+- Source commit `627fcee` was pushed and passed exact-commit Windows/Linux CI (run `33961612843`); the beta ZIP and checksums were verified.
+- Real Windows release processes rejected duplicate serve instances and preserved all four pending phases plus the logical SQLite contents across process restart. This is separate from OS sleep/reboot and five-day acceptance.
+- LM Studio 0.4.16 registered the dedicated MCP provider and created its database under per-server `env.DAYLOOP_HOME`. The first real-GUI prompt began inference, but the application exited before a dayloop tool result was observed; cause is awaiting clarification. The isolated ledger remained unchanged. Full real-client acceptance is still incomplete.
+- MCP examples now specify the isolated server environment directly. See `docs/acceptance-20260905.md` for evidence and remaining gates.
