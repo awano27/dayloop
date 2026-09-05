@@ -56,6 +56,10 @@ Windows での場所は `%APPDATA%\Claude\claude_desktop_config.json` です。
 
 ## 質問形式
 
+台帳の診断は `check_ledger`、閉鎖日の訂正は `reopen_day`（`date` と本人の `reason` が必須）で行います。`confirm_plan` は前の未閉鎖日が残っていると拒否されます。`reopen_day` は本人が訂正を指示したときだけ呼び、拒否された操作を通すために自動で呼ばないでください。
+
+`schedule_task` は未計画タスク専用です。予定済みのタスクは理由付きで `carry_over` を使います。3回持ち越した後の次の持ち越しは、分割・取り下げ・実際の期限変更を本人が選ぶまで拒否されます。
+
 `plan_day` / `check_in` / `close_day` / `retro_week` の `questions[]` は、選択肢ごとに呼ぶツールが1つに決まっている。
 
 ```json

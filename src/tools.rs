@@ -11,19 +11,21 @@ use crate::util::{next_workday, parse_date, resolve_date};
 
 pub fn list() -> Vec<Value> {
     vec![
+        tool("reopen_day", "本人が訂正を指示したときだけ、理由付きで閉鎖日を再開する。タスクの完了状態は変えない。", obj(&[("date", str_date()), ("reason", schema("string", "再開する理由"))], &["date", "reason"])),
+        tool("check_ledger", "台帳の矛盾を診断する。タスクを修復・変更しない。", obj(&[], &[])),
         tool("get_today", "今日（または指定日）のタスクと Day の状態、未処理候補数、未クローズの過去日を返す。会話の最初に呼ぶ。", obj(&[("date", str_date())], &[])),
-        tool("plan_day", "朝に呼ぶ。未クローズ日・候補・未計画・今日の予定と questions を返す。本人に1問ずつ聞き、resolve_with のツールで反映してから confirm_plan する。", obj(&[("date", str_date())], &[])),
+        tool("plan_day", "朝に呼ぶ。未クローズ日・候補・未計画・今日の予定と questions を返す。本人に1問ずつ聞き、options のツールで反映してから confirm_plan する。", obj(&[("date", str_date())], &[])),
         tool("confirm_plan", "plan_day の questions を処理したあと、その日の予定を確定し plan_confirmed_at を記録する。", obj(&[("date", str_date())], &[])),
         tool("add_task", "タスクを追加する。backlog=true なら未計画、そうでなければ date（省略時は今日）の予定になる。", obj(&[("title", schema("string", "タスク名")), ("due", schema("string", "期限 YYYY-MM-DD")), ("estimate_min", schema("integer", "見積（分）")), ("date", str_date()), ("backlog", schema("boolean", "未計画に入れる"))], &["title"])),
         tool("schedule_task", "未計画のタスクを指定日の予定に入れる。plan_day の backlog 質問への回答。", obj(&[("id", str_id()), ("date", schema("string", "予定日 YYYY-MM-DD"))], &["id", "date"])),
         tool("start_task", "タスクを進行中にする。未計画なら date（省略時は今日）の予定に入れてから着手する。", obj(&[("id", str_id()), ("date", str_date())], &["id"])),
         tool("finish_task", "タスクを完了にする。close_day の「完了」回答。", obj(&[("id", str_id()), ("evidence", schema("string", "完了の根拠（PR URL など）"))], &["id"])),
         tool("set_not_done", "タスクを未完了にする。reason は空にできない。", obj(&[("id", str_id()), ("reason", schema("string", "未完了の理由"))], &["id", "reason"])),
-        tool("carry_over", "タスクを持ち越す。3回目以降は error=carry_blocked と question を返す（例外にしない）。期限変更は reschedule_due を付ける。", obj(&[("id", str_id()), ("reason", schema("string", "持ち越し理由")), ("to", schema("string", "持ち越し先 YYYY-MM-DD")), ("reschedule_due", schema("string", "新しい期限。付けると持ち越し回数をリセット"))], &["id", "reason"])),
+        tool("carry_over", "タスクを持ち越す。3回持ち越し済みの場合は次の持ち越しで error=carry_blocked と question を返す（例外にしない）。期限変更は reschedule_due を付ける。", obj(&[("id", str_id()), ("reason", schema("string", "持ち越し理由")), ("to", schema("string", "持ち越し先 YYYY-MM-DD")), ("reschedule_due", schema("string", "新しい期限。現在と異なる日付に変更した場合だけ持ち越し回数をリセット"))], &["id", "reason"])),
         tool("drop_task", "タスクを取り下げる。reason は空にできない。", obj(&[("id", str_id()), ("reason", schema("string", "取り下げ理由"))], &["id", "reason"])),
         tool("split_task", "タスクを2つ以上に分割する。元は取り下げ、titles が to（省略時は次の営業日）の予定になる。持ち越し上限の解消に使う。", obj(&[("id", str_id()), ("titles", json!({"type":"array","items":{"type":"string"},"description":"分割後のタイトル（2つ以上）"})), ("reason", schema("string", "分割理由")), ("to", schema("string", "分割先 YYYY-MM-DD"))], &["id", "titles", "reason"])),
-        tool("check_in", "昼に呼ぶ。進行中・未着手と questions を返す。本人に1問ずつ聞き、resolve_with のツールで反映する。", obj(&[("date", str_date())], &[])),
-        tool("close_day", "夕方に呼ぶ。open が残った場合は closed=false と questions を返す。既定値では閉じない。questions を本人に1問ずつ聞き、resolve_with のツールで確定してから再度呼ぶ。", obj(&[("date", str_date())], &[])),
+        tool("check_in", "昼に呼ぶ。進行中・未着手と questions を返す。本人に1問ずつ聞き、options のツールで反映する。", obj(&[("date", str_date())], &[])),
+        tool("close_day", "夕方に呼ぶ。open が残った場合は closed=false と questions を返す。既定値では閉じない。questions を本人に1問ずつ聞き、options のツールで確定してから再度呼ぶ。", obj(&[("date", str_date())], &[])),
         tool("retro_week", "週末に呼ぶ。週の集計・日別・持ち越し上位と、carried_count>=3 の open タスクの questions を返す。", obj(&[("date", str_date())], &[])),
         tool("list_candidates", "採用/却下待ちの候補を返す。age_days と stale（7日以上）付き。", obj(&[], &[])),
         tool("add_candidate", "候補箱に追加する。同じ source_ref が既にあるか却下済みなら skipped を返す。", obj(&[("title", schema("string", "候補のタイトル")), ("source", schema("string", "teams / outlook / meeting / alert / manual")), ("source_ref", schema("string", "元メッセージ等への参照"))], &["title", "source"])),
@@ -52,6 +54,16 @@ pub fn dispatch(store: &Store, name: &str, args: &Value) -> Value {
 
 fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
     match name {
+        "reopen_day" => {
+            let date = req_str(args, "date")?;
+            store.reopen_day(&date, &req_str(args, "reason")?)?;
+            markdown::export(store, &date)?;
+            Ok(json!({"reopened":true,"day":store.get_day(&date)?}))
+        }
+        "check_ledger" => {
+            let issues = store.integrity_issues()?;
+            Ok(json!({"ok":issues.is_empty(),"issues":issues}))
+        }
         "get_today" => engine::today_view(store, &date_arg(args)?),
         "plan_day" => engine::plan_view(store, &date_arg(args)?),
         "confirm_plan" => {
@@ -100,7 +112,8 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
         }
         "finish_task" => {
             let id = req_str(args, "id")?;
-            let t = store.transition(&id, State::Done, None, opt_str(args, "evidence").as_deref())?;
+            let t =
+                store.transition(&id, State::Done, None, opt_str(args, "evidence").as_deref())?;
             export_task(store, &t)?;
             Ok(serde_json::to_value(t)?)
         }
@@ -129,7 +142,12 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
             if let Some(r) = opt_str(args, "reschedule_due") {
                 parse_date(&r)?;
             }
-            let t = store.carry_over(&old.id, &reason, &to, opt_str(args, "reschedule_due").as_deref())?;
+            let t = store.carry_over(
+                &old.id,
+                &reason,
+                &to,
+                opt_str(args, "reschedule_due").as_deref(),
+            )?;
             export_task(store, &old)?;
             export_task(store, &t)?;
             Ok(serde_json::to_value(t)?)
@@ -190,7 +208,10 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
         "retro_week" => engine::retro_view(store, &date_arg(args)?),
         "list_candidates" => {
             let cands = store.open_candidates()?;
-            Ok(json!(cands.iter().map(engine::candidate_json).collect::<Vec<_>>()))
+            Ok(json!(cands
+                .iter()
+                .map(engine::candidate_json)
+                .collect::<Vec<_>>()))
         }
         "add_candidate" => {
             let title = req_str(args, "title")?;
@@ -248,23 +269,28 @@ fn req_str(args: &Value, k: &str) -> Result<String> {
 }
 
 fn opt_str(args: &Value, k: &str) -> Option<String> {
-    args.get(k).and_then(|v| {
-        if v.is_null() {
-            None
-        } else {
-            v.as_str().map(|s| s.to_string())
-        }
-    })
-    .filter(|s| !s.is_empty())
+    args.get(k)
+        .and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s.to_string())
+            }
+        })
+        .filter(|s| !s.is_empty())
 }
 
 fn opt_i64(args: &Value, k: &str) -> Option<i64> {
-    args.get(k).and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+    args.get(k)
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
 }
 
 fn opt_bool(args: &Value, k: &str) -> bool {
     args.get(k)
-        .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true" || s == "1")))
+        .and_then(|v| {
+            v.as_bool()
+                .or_else(|| v.as_str().map(|s| s == "true" || s == "1"))
+        })
         .unwrap_or(false)
 }
 

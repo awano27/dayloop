@@ -10,8 +10,12 @@ pub fn today() -> String {
 }
 
 pub fn parse_date(s: &str) -> Result<NaiveDate> {
-    NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| anyhow!("日付は YYYY-MM-DD 形式で指定してください: {s}"))
+    let date = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map_err(|_| anyhow!("日付は YYYY-MM-DD 形式で指定してください: {s}"))?;
+    if date.format("%Y-%m-%d").to_string() != s {
+        return Err(anyhow!("日付は YYYY-MM-DD 形式で指定してください: {s}"));
+    }
+    Ok(date)
 }
 
 fn fmt(d: NaiveDate) -> String {

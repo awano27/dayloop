@@ -1,26 +1,32 @@
 //! Daily Markdown mirror. The person can edit it by hand; `import` pulls edits back.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use crate::model::State;
-use crate::paths;
 use crate::store::{Store, CANDIDATE_STALE_DAYS};
-use crate::util::{days_since, hhmm};
+use crate::util::{days_since, hhmm, parse_date};
 
 pub fn export(store: &Store, date: &str) -> Result<std::path::PathBuf> {
+    parse_date(date)?;
     let day = store.get_day(date)?;
     let tasks = store.tasks_for_day(date)?;
     let cands = store.open_candidates()?;
     let mut out = String::new();
     out.push_str(&format!("# {date}\n\n"));
-    out.push_str("<!-- dayloop: 手で編集できます。[x] を付けた行は `dayloop import` で完了になります。\n");
+    out.push_str(
+        "<!-- dayloop: 手で編集できます。[x] を付けた行は `dayloop import` で完了になります。\n",
+    );
     out.push_str("     「今日のタスク」に `- [ ] 新しい行` を足すと新規タスクになります。 -->\n\n");
 
     let events = store.events_for_day(date)?;
     if !events.is_empty() {
         out.push_str("## 今日の予定\n");
         for e in &events {
-            let loc = e.location.as_deref().map(|l| format!("（{l}）")).unwrap_or_default();
+            let loc = e
+                .location
+                .as_deref()
+                .map(|l| format!("（{l}）"))
+                .unwrap_or_default();
             out.push_str(&format!(
                 "- {}-{} {}{}\n",
                 hhmm(&e.start),
@@ -43,11 +49,25 @@ pub fn export(store: &Store, date: &str) -> Result<std::path::PathBuf> {
         out.push_str("- [ ] \n");
     }
     for t in open {
-        let mark = if t.state == State::InProgress { "着手中 " } else { "" };
-        out.push_str(&format!("- [ ] {mark}{}{} <!-- id:{} -->\n", t.title, meta(t), t.id));
+        let mark = if t.state == State::InProgress {
+            "着手中 "
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "- [ ] {mark}{}{} <!-- id:{} -->\n",
+            t.title,
+            meta(t),
+            t.id
+        ));
     }
     for t in done {
-        out.push_str(&format!("- [x] {}{} <!-- id:{} -->\n", t.title, meta(t), t.id));
+        out.push_str(&format!(
+            "- [x] {}{} <!-- id:{} -->\n",
+            t.title,
+            meta(t),
+            t.id
+        ));
     }
     for t in other {
         let reason = t.state_reason.as_deref().unwrap_or("");
@@ -64,7 +84,11 @@ pub fn export(store: &Store, date: &str) -> Result<std::path::PathBuf> {
         out.push_str("\n## 候補（採用 / 却下待ち）\n");
         for c in cands {
             let age = days_since(&c.created_at);
-            let stale = if age >= CANDIDATE_STALE_DAYS { " **放置**" } else { "" };
+            let stale = if age >= CANDIDATE_STALE_DAYS {
+                " **放置**"
+            } else {
+                ""
+            };
             out.push_str(&format!(
                 "- {} （{}、{age}日前）{stale} <!-- cand:{} -->\n",
                 c.title, c.source, c.id
@@ -92,7 +116,7 @@ pub fn export(store: &Store, date: &str) -> Result<std::path::PathBuf> {
         }
     }
 
-    let path = paths::day_md_path(date);
+    let path = store.data_dir().join("days").join(format!("{date}.md"));
     std::fs::write(&path, out)?;
     Ok(path)
 }
@@ -119,43 +143,56 @@ pub struct ImportReport {
 
 /// Apply hand edits: `[x]` completes an open task; new `- [ ]` lines become tasks.
 pub fn import(store: &Store, date: &str) -> Result<ImportReport> {
-    let path = paths::day_md_path(date);
+    parse_date(date)?;
+    let path = store.data_dir().join("days").join(format!("{date}.md"));
     let text = std::fs::read_to_string(&path)?;
-    let mut report = ImportReport { completed: 0, added: 0 };
-    let mut in_tasks = false;
-    for raw in text.lines() {
-        let line = raw.trim_end();
-        if line.starts_with("## ") {
-            in_tasks = line.starts_with("## 今日のタスク");
-            continue;
-        }
-        if !in_tasks {
-            continue;
-        }
-        let Some(rest) = line.strip_prefix("- [") else { continue };
-        let Some(mark) = rest.chars().next() else { continue };
-        let body = rest.get(2..).unwrap_or("").trim();
-        let (title_part, id) = match body.find("<!-- id:") {
-            Some(i) => {
-                let id = body[i + 8..].trim_end_matches("-->").trim().to_string();
-                (body[..i].trim().to_string(), Some(id))
-            }
-            None => (body.to_string(), None),
+    store.atomic(|| {
+        let mut report = ImportReport {
+            completed: 0,
+            added: 0,
         };
-        match (mark, id) {
-            ('x' | 'X', Some(id)) => {
-                let t = store.get_task(&id)?;
-                if t.state.is_open() {
-                    store.transition(&t.id, State::Done, None, Some("markdown"))?;
-                    report.completed += 1;
+        let mut in_tasks = false;
+        for raw in text.lines() {
+            let line = raw.trim_end();
+            if line.starts_with("## ") {
+                in_tasks = line.starts_with("## 今日のタスク");
+                continue;
+            }
+            if !in_tasks {
+                continue;
+            }
+            let Some(rest) = line.strip_prefix("- [") else {
+                continue;
+            };
+            let Some(mark) = rest.chars().next() else {
+                continue;
+            };
+            let body = rest.get(2..).unwrap_or("").trim();
+            let (title_part, id) = match body.find("<!-- id:") {
+                Some(i) => {
+                    let id = body[i + 8..].trim_end_matches("-->").trim().to_string();
+                    (body[..i].trim().to_string(), Some(id))
                 }
+                None => (body.to_string(), None),
+            };
+            match (mark, id) {
+                ('x' | 'X', Some(id)) => {
+                    let t = store.get_task(&id)?;
+                    if t.id != id || t.plan_date.as_deref() != Some(date) {
+                        bail!("MarkdownのタスクIDが対象日と一致しません: {id}");
+                    }
+                    if t.state.is_open() {
+                        store.transition(&t.id, State::Done, None, Some("markdown"))?;
+                        report.completed += 1;
+                    }
+                }
+                (' ', None) if !title_part.is_empty() => {
+                    store.add_task(&title_part, None, None, "manual", None, Some(date))?;
+                    report.added += 1;
+                }
+                _ => {}
             }
-            (' ', None) if !title_part.is_empty() => {
-                store.add_task(&title_part, None, None, "manual", None, Some(date))?;
-                report.added += 1;
-            }
-            _ => {}
         }
-    }
-    Ok(report)
+        Ok(report)
+    })
 }

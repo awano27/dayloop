@@ -31,6 +31,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// 閉鎖済みの日を理由付きで再開（タスクの結果は変更しない）
+    Reopen {
+        #[arg(long)]
+        date: Option<String>,
+        #[arg(long)]
+        reason: String,
+    },
+    /// 台帳の整合性を診断
+    #[command(subcommand)]
+    Ledger(LedgerCmd),
+    /// SQLiteの整合したバックアップを作る（既存ファイルは上書きしない）
+    Backup {
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
     /// 今日の状態を表示
     Today {
         #[arg(long)]
@@ -159,6 +174,14 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum LedgerCmd {
+    Check {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum IntakeCmd {
     /// Outlook デスクトップ（COM）からメール・予定を読む
     Outlook {
@@ -170,9 +193,7 @@ enum IntakeCmd {
         dry_run: bool,
     },
     /// フィクスチャ JSON を同じパイプラインに流す
-    Fixture {
-        dir: std::path::PathBuf,
-    },
+    Fixture { dir: std::path::PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -256,22 +277,108 @@ fn run() -> Result<i32> {
         }
         return Ok(0);
     }
-    let store = Store::open()?;
+    let store = if matches!(cli.cmd, Cmd::Ledger(_)) {
+        Store::open_read_only(paths::db_path())?
+    } else {
+        Store::open()?
+    };
     let ui = Ui::new(cli.yes);
 
     let code = match cli.cmd {
+        Cmd::Reopen { date, reason } => {
+            let d = resolve_date(date.as_deref())?;
+            store.reopen_day(&d, &reason)?;
+            markdown::export(&store, &d)?;
+            println!("{d} を再開しました。タスクの結果は保持されています。");
+            0
+        }
+        Cmd::Ledger(LedgerCmd::Check { json }) => {
+            let issues = store.integrity_issues()?;
+            let ok = issues.is_empty();
+            if json {
+                println!("{}", serde_json::json!({"ok":ok,"issues":issues}));
+            } else if ok {
+                println!("台帳の不整合は見つかりませんでした");
+            } else {
+                for issue in &issues {
+                    println!(
+                        "{} {} {}",
+                        issue.code,
+                        issue.date.as_deref().unwrap_or("未計画"),
+                        issue.detail
+                    );
+                }
+            }
+            if ok {
+                0
+            } else {
+                1
+            }
+        }
+        Cmd::Backup { output } => {
+            let output = output.unwrap_or_else(|| {
+                store
+                    .data_dir()
+                    .join("backups")
+                    .join(format!("dayloop-{}.db", ulid::Ulid::new()))
+            });
+            let output = if output.is_absolute() {
+                output
+            } else {
+                store.data_dir().join(output)
+            };
+            if output
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                anyhow::bail!("バックアップ先はdayloopのデータ領域内を指定してください");
+            }
+            let ancestor = output
+                .ancestors()
+                .find(|p| p.exists())
+                .ok_or_else(|| anyhow::anyhow!("保存先を確認できません"))?;
+            if !std::fs::canonicalize(ancestor)?.starts_with(store.data_dir()) {
+                anyhow::bail!("保存先がデータ領域の外を参照しています");
+            }
+            let output = std::fs::canonicalize(ancestor)?.join(output.strip_prefix(ancestor)?);
+            store.backup_to(&output)?;
+            println!("{}", output.display());
+            0
+        }
         Cmd::Today { date } => {
             let d = resolve_date(date.as_deref())?;
             rituals::print_day(&store, &d)?;
             0
         }
-        Cmd::Add { title, due, estimate, date, backlog } => {
+        Cmd::Add {
+            title,
+            due,
+            estimate,
+            date,
+            backlog,
+        } => {
             if let Some(d) = &due {
                 parse_date(d)?;
             }
-            let plan = if backlog { None } else { Some(resolve_date(date.as_deref())?) };
-            let t = store.add_task(&title, due.as_deref(), estimate, "manual", None, plan.as_deref())?;
-            println!("追加: {}  {}  [{}]", short(&t.id), t.title, t.state.label_ja());
+            let plan = if backlog {
+                None
+            } else {
+                Some(resolve_date(date.as_deref())?)
+            };
+            let t = store.add_task(
+                &title,
+                due.as_deref(),
+                estimate,
+                "manual",
+                None,
+                plan.as_deref(),
+            )?;
+            println!(
+                "追加: {}  {}  [{}]",
+                short(&t.id),
+                t.title,
+                t.state.label_ja()
+            );
             if let Some(d) = plan {
                 markdown::export(&store, &d)?;
             }
@@ -312,7 +419,12 @@ fn run() -> Result<i32> {
             export_for(&store, &t)?;
             0
         }
-        Cmd::Carry { id, reason, to, reschedule } => {
+        Cmd::Carry {
+            id,
+            reason,
+            to,
+            reschedule,
+        } => {
             let old = store.get_task(&id)?;
             let base = old.plan_date.clone().unwrap_or_else(util::today);
             let to = match to {
@@ -326,7 +438,12 @@ fn run() -> Result<i32> {
                 parse_date(r)?;
             }
             let t = store.carry_over(&old.id, &reason, &to, reschedule.as_deref())?;
-            println!("持ち越し: {}  {}  -> {to}（{}回目）", short(&t.id), t.title, t.carried_count);
+            println!(
+                "持ち越し: {}  {}  -> {to}（{}回目）",
+                short(&t.id),
+                t.title,
+                t.carried_count
+            );
             export_for(&store, &old)?;
             export_for(&store, &t)?;
             0
@@ -337,7 +454,12 @@ fn run() -> Result<i32> {
             export_for(&store, &t)?;
             0
         }
-        Cmd::Split { id, reason, into, to } => {
+        Cmd::Split {
+            id,
+            reason,
+            into,
+            to,
+        } => {
             let old = store.get_task(&id)?;
             let base = old.plan_date.clone().unwrap_or_else(util::today);
             let to = match to {
@@ -374,12 +496,25 @@ fn run() -> Result<i32> {
                 }
                 for c in cands {
                     let age = util::days_since(&c.created_at);
-                    let stale = if age >= store::CANDIDATE_STALE_DAYS { "  !! 放置" } else { "" };
-                    println!("{}  {}  ({}、{age}日前){stale}", short(&c.id), c.title, c.source);
+                    let stale = if age >= store::CANDIDATE_STALE_DAYS {
+                        "  !! 放置"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "{}  {}  ({}、{age}日前){stale}",
+                        short(&c.id),
+                        c.title,
+                        c.source
+                    );
                 }
                 0
             }
-            CandCmd::Add { title, source, source_ref } => {
+            CandCmd::Add {
+                title,
+                source,
+                source_ref,
+            } => {
                 match store.add_candidate(&title, &source, source_ref.as_deref())? {
                     Some(c) => println!("候補追加: {}  {}", short(&c.id), c.title),
                     None => println!("同じ参照が既に存在するか却下済みのため追加しません"),
@@ -387,9 +522,18 @@ fn run() -> Result<i32> {
                 0
             }
             CandCmd::Accept { id, backlog, date } => {
-                let plan = if backlog { None } else { Some(resolve_date(date.as_deref())?) };
+                let plan = if backlog {
+                    None
+                } else {
+                    Some(resolve_date(date.as_deref())?)
+                };
                 let t = store.accept_candidate(&id, plan.as_deref())?;
-                println!("採用: {}  {}  [{}]", short(&t.id), t.title, t.state.label_ja());
+                println!(
+                    "採用: {}  {}  [{}]",
+                    short(&t.id),
+                    t.title,
+                    t.state.label_ja()
+                );
                 export_for(&store, &t)?;
                 0
             }

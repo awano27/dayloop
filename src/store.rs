@@ -1,11 +1,16 @@
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Row, Transaction, TransactionBehavior,
+};
 
 use crate::model::{Candidate, Day, Event, State, Task};
 use crate::paths;
-use crate::util::now;
+use crate::util::{now, parse_date};
+
+mod schema;
 
 /// A task carried this many times cannot be carried again without a resolution.
 pub const MAX_CARRY: i64 = 3;
@@ -70,6 +75,14 @@ pub struct CarryBlocked {
     pub task: Task,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct LedgerIssue {
+    pub code: String,
+    pub date: Option<String>,
+    pub task_id: Option<String>,
+    pub detail: String,
+}
+
 impl fmt::Display for CarryBlocked {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -84,6 +97,17 @@ impl std::error::Error for CarryBlocked {}
 
 fn row_to_task(r: &Row) -> rusqlite::Result<Task> {
     let st: String = r.get("state")?;
+    let state = State::parse(&st).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            7,
+            rusqlite::types::Type::Text,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "未知のタスク状態です。ledger check で診断してください",
+            )
+            .into(),
+        )
+    })?;
     Ok(Task {
         id: r.get("id")?,
         title: r.get("title")?,
@@ -92,7 +116,7 @@ fn row_to_task(r: &Row) -> rusqlite::Result<Task> {
         due: r.get("due")?,
         estimate_min: r.get("estimate_min")?,
         plan_date: r.get("plan_date")?,
-        state: State::parse(&st).unwrap_or(State::Planned),
+        state,
         state_reason: r.get("state_reason")?,
         carried_count: r.get("carried_count")?,
         evidence: r.get("evidence")?,
@@ -117,17 +141,132 @@ fn new_id() -> String {
 }
 
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
+    db_path: PathBuf,
 }
 
 impl Store {
     pub fn open() -> Result<Store> {
-        std::fs::create_dir_all(paths::data_dir())?;
-        std::fs::create_dir_all(paths::days_dir())?;
-        let conn = Connection::open(paths::db_path())?;
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(Store { conn })
+        Self::open_at(paths::db_path())
+    }
+
+    pub fn open_at(path: impl AsRef<Path>) -> Result<Store> {
+        let path = path.as_ref();
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        schema::migrate(&conn, path, SCHEMA)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        let db_path = std::fs::canonicalize(path)?;
+        std::fs::create_dir_all(parent.join("days"))?;
+        Ok(Store { conn, db_path })
+    }
+
+    /// Inspect existing ledgers without creating directories, migrating or changing journal mode.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Store> {
+        let db_path = std::fs::canonicalize(path)?;
+        let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        schema::check_readable(&conn)?;
+        Ok(Store { conn, db_path })
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        self.db_path
+            .parent()
+            .expect("absolute database path has a parent")
+    }
+
+    pub fn backup_to(&self, path: &Path) -> Result<()> {
+        schema::backup(&self.conn, path)
+    }
+
+    pub fn integrity_issues(&self) -> Result<Vec<LedgerIssue>> {
+        let mut issues = Vec::new();
+        let mut statement = self.conn.prepare("SELECT t.id,t.plan_date,t.state,t.state_reason,t.carried_count,t.closed_at,d.closed_at FROM tasks t LEFT JOIN days d ON d.date=t.plan_date ORDER BY t.id")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let date: Option<String> = row.get(1)?;
+            let state: String = row.get(2)?;
+            let reason: Option<String> = row.get(3)?;
+            let count: i64 = row.get(4)?;
+            let closed: Option<String> = row.get(5)?;
+            let day_closed: Option<String> = row.get(6)?;
+            let mut report = |code: &str, detail: &str| {
+                issues.push(LedgerIssue {
+                    code: code.into(),
+                    date: date.clone(),
+                    task_id: Some(id.clone()),
+                    detail: detail.into(),
+                })
+            };
+            match State::parse(&state) {
+                Some(s) => {
+                    if s.is_open() && day_closed.is_some() {
+                        report(
+                            "closed_day_open_task",
+                            "閉鎖済みの日に未確定タスクがあります",
+                        );
+                    }
+                    if s.is_open() && date.is_none() || s == State::Backlog && date.is_some() {
+                        report("state_date_mismatch", "状態と予定日が整合しません");
+                    }
+                    if s.needs_reason() && reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
+                        report("missing_reason", "終端状態に必要な理由がありません");
+                    }
+                    if s.is_terminal() != closed.is_some() {
+                        report("state_closed_at_mismatch", "状態と確定時刻が整合しません");
+                    }
+                }
+                None => report("unknown_state", "未知のタスク状態です"),
+            }
+            if count < 0 {
+                report("negative_carry_count", "持ち越し回数が負の値です");
+            }
+            if date.as_deref().is_some_and(|d| parse_date(d).is_err()) {
+                report("invalid_plan_date", "予定日が不正です");
+            }
+        }
+        Ok(issues)
+    }
+
+    /// Serialize each read-check-write sequence, including nested Store operations.
+    pub(crate) fn atomic<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<T> {
+        if self.conn.is_autocommit() {
+            let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+            let value = action()?;
+            tx.commit()?;
+            Ok(value)
+        } else {
+            self.conn.execute_batch("SAVEPOINT dayloop_write")?;
+            match action() {
+                Ok(value) => {
+                    self.conn.execute_batch("RELEASE dayloop_write")?;
+                    Ok(value)
+                }
+                Err(error) => {
+                    self.conn
+                        .execute_batch("ROLLBACK TO dayloop_write; RELEASE dayloop_write")?;
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn require_open_day(&self, date: &str) -> Result<()> {
+        parse_date(date)?;
+        if self
+            .get_day(date)?
+            .is_some_and(|day| day.closed_at.is_some())
+        {
+            bail!("{date} は閉鎖済みです。訂正する場合は理由を指定して reopen してください");
+        }
+        Ok(())
     }
 
     fn query_tasks(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<Task>> {
@@ -139,10 +278,9 @@ impl Store {
     // ---------- days ----------
 
     pub fn ensure_day(&self, date: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO days(date) VALUES(?1)",
-            params![date],
-        )?;
+        parse_date(date)?;
+        self.conn
+            .execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![date])?;
         Ok(())
     }
 
@@ -165,26 +303,61 @@ impl Store {
     }
 
     pub fn confirm_plan(&self, date: &str) -> Result<()> {
-        self.ensure_day(date)?;
-        self.conn.execute(
-            "UPDATE days SET plan_confirmed_at=?2 WHERE date=?1",
-            params![date, now()],
-        )?;
-        Ok(())
+        self.atomic(|| {
+            self.require_open_day(date)?;
+            let previous = self.unclosed_days_before(date)?;
+            if !previous.is_empty() {
+                bail!("先に前日までを確定してください: {}", previous.join(", "));
+            }
+            self.ensure_day(date)?;
+            self.conn.execute(
+                "UPDATE days SET plan_confirmed_at=?2 WHERE date=?1",
+                params![date, now()],
+            )?;
+            Ok(())
+        })
     }
 
     /// Invariant 1: a day closes only when no planned/in_progress task remains.
     pub fn close_day(&self, date: &str) -> Result<std::result::Result<(), Vec<Task>>> {
-        let open = self.open_tasks_for_day(date)?;
-        if !open.is_empty() {
-            return Ok(Err(open));
+        self.atomic(|| {
+            parse_date(date)?;
+            let open: Vec<_> = self
+                .tasks_for_day(date)?
+                .into_iter()
+                .filter(|t| t.state.is_open())
+                .collect();
+            if !open.is_empty() {
+                return Ok(Err(open));
+            }
+            self.ensure_day(date)?;
+            self.conn.execute(
+                "UPDATE days SET closed_at=COALESCE(closed_at, ?2) WHERE date=?1",
+                params![date, now()],
+            )?;
+            Ok(Ok(()))
+        })
+    }
+
+    pub fn reopen_day(&self, date: &str, reason: &str) -> Result<()> {
+        parse_date(date)?;
+        if reason.trim().is_empty() {
+            bail!("再開には理由が必須です");
         }
-        self.ensure_day(date)?;
-        self.conn.execute(
-            "UPDATE days SET closed_at=?2 WHERE date=?1",
-            params![date, now()],
-        )?;
-        Ok(Ok(()))
+        self.atomic(|| {
+            if self.get_day(date)?.is_none_or(|d| d.closed_at.is_none()) {
+                bail!("再開できるのは閉鎖済みの日だけです");
+            }
+            self.conn.execute(
+                "UPDATE days SET closed_at=NULL, plan_confirmed_at=NULL WHERE date=?1",
+                [date],
+            )?;
+            self.conn.execute(
+                "INSERT INTO ledger_audit(date,action,reason,created_at) VALUES(?1,'reopen',?2,?3)",
+                params![date, reason.trim(), now()],
+            )?;
+            Ok(())
+        })
     }
 
     pub fn set_retro(&self, date: &str, note: &str) -> Result<()> {
@@ -196,13 +369,16 @@ impl Store {
         Ok(())
     }
 
-    /// Invariant 5: dates before `date` that had tasks but were never closed.
+    /// Invariant 5: prior unclosed ledger days, including empty/reopened days.
     pub fn unclosed_days_before(&self, date: &str) -> Result<Vec<String>> {
+        parse_date(date)?;
         let mut st = self.conn.prepare(
-            "SELECT DISTINCT t.plan_date FROM tasks t
+            "SELECT date FROM days WHERE date < ?1 AND closed_at IS NULL
+             UNION SELECT DISTINCT t.plan_date FROM tasks t
              LEFT JOIN days d ON d.date = t.plan_date
-             WHERE t.plan_date IS NOT NULL AND t.plan_date < ?1 AND d.closed_at IS NULL
-             ORDER BY t.plan_date",
+             WHERE t.plan_date IS NOT NULL AND t.plan_date < ?1
+             AND (d.closed_at IS NULL OR t.state IN ('planned','in_progress'))
+             ORDER BY 1",
         )?;
         let rows = st.query_map(params![date], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -216,13 +392,15 @@ impl Store {
             bail!("タスク ID を指定してください");
         }
         let v = self.query_tasks(
-            &format!("SELECT {TASK_COLS} FROM tasks WHERE id = ?1 OR id LIKE ?2 OR id LIKE ?3 ORDER BY created_at"),
-            &[&up, &format!("{up}%"), &format!("%{up}")],
+            &format!("SELECT {TASK_COLS} FROM tasks WHERE upper(id) = ?1 OR substr(upper(id),1,length(?1)) = ?1 OR substr(upper(id),-length(?1)) = ?1 ORDER BY created_at"),
+            &[&up],
         )?;
         match v.len() {
             0 => bail!("タスクが見つかりません: {idish}"),
             1 => Ok(v.into_iter().next().unwrap()),
-            n => bail!("{idish} に一致するタスクが {n} 件あります。ID をもう少し長く指定してください"),
+            n => bail!(
+                "{idish} に一致するタスクが {n} 件あります。ID をもう少し長く指定してください"
+            ),
         }
     }
 
@@ -278,10 +456,14 @@ impl Store {
         source_ref: Option<&str>,
         plan_date: Option<&str>,
     ) -> Result<Task> {
+        self.atomic(|| {
         let title = title.trim();
         if title.is_empty() {
             bail!("タイトルが空です");
         }
+        if let Some(date) = plan_date { self.require_open_day(date)?; }
+        if let Some(date) = due { parse_date(date)?; }
+        if estimate_min.is_some_and(|n| n < 0) { bail!("見積は0以上の分数を指定してください"); }
         let id = new_id();
         let state = if plan_date.is_some() {
             State::Planned
@@ -297,25 +479,24 @@ impl Store {
             self.ensure_day(d)?;
         }
         self.get_task(&id)
+        })
     }
 
-    /// Move a backlog (or planned) task onto a date.
+    /// Schedule backlog only. Moving planned work requires a reasoned carry-over.
     pub fn schedule(&self, id: &str, date: &str) -> Result<Task> {
+        self.atomic(|| {
+        self.require_open_day(date)?;
         let t = self.get_task(id)?;
-        if t.state.is_terminal() {
-            bail!("「{}」は既に {} です", t.title, t.state.label_ja());
+        if t.state != State::Backlog || t.plan_date.is_some() {
+            bail!("schedule は未計画タスク専用です。予定済みの作業は理由付きで carry してください");
         }
-        let state = if t.state == State::InProgress {
-            State::InProgress
-        } else {
-            State::Planned
-        };
         self.conn.execute(
             "UPDATE tasks SET plan_date=?2, state=?3 WHERE id=?1",
-            params![t.id, date, state.as_str()],
+            params![t.id, date, State::Planned.as_str()],
         )?;
         self.ensure_day(date)?;
         self.get_task(&t.id)
+        })
     }
 
     /// Invariant 2: not_done / dropped require a reason. Carry goes through carry_over.
@@ -326,12 +507,14 @@ impl Store {
         reason: Option<&str>,
         evidence: Option<&str>,
     ) -> Result<Task> {
+        self.atomic(|| {
         let t = self.get_task(id)?;
+        if let Some(date) = &t.plan_date { self.require_open_day(date)?; }
         if t.state.is_terminal() {
             bail!("「{}」は既に {} です", t.title, t.state.label_ja());
         }
-        if to == State::Carried {
-            bail!("持ち越しは carry を使ってください");
+        if matches!(to, State::Carried | State::Backlog | State::Planned) {
+            bail!("予定変更・持ち越しには専用の操作を使ってください");
         }
         if to.needs_reason() && reason.map(|r| r.trim().is_empty()).unwrap_or(true) {
             bail!("{} には理由が必須です", to.label_ja());
@@ -345,6 +528,7 @@ impl Store {
             params![t.id, to.as_str(), reason.map(str::trim), evidence, closed],
         )?;
         self.get_task(&t.id)
+        })
     }
 
     /// Carry to `to_date`. Returns the new task. Errors with CarryBlocked at the limit
@@ -356,7 +540,10 @@ impl Store {
         to_date: &str,
         reschedule_due: Option<&str>,
     ) -> Result<Task> {
+        self.atomic(|| {
+        self.require_open_day(to_date)?;
         let t = self.get_task(id)?;
+        if let Some(date) = &t.plan_date { self.require_open_day(date)?; }
         if !t.state.is_open() && t.state != State::Backlog {
             bail!("「{}」は既に {} です", t.title, t.state.label_ja());
         }
@@ -366,19 +553,21 @@ impl Store {
         let mut count = t.carried_count;
         let mut due = t.due.clone();
         if let Some(d) = reschedule_due {
-            due = Some(d.to_string());
-            count = 0;
+            parse_date(d)?;
+            if due.as_deref() != Some(d) {
+                due = Some(d.to_string());
+                count = 0;
+            }
         }
         if count >= MAX_CARRY {
             return Err(CarryBlocked { task: t }.into());
         }
         let new_id = new_id();
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
+        self.conn.execute(
             "UPDATE tasks SET state='carried', state_reason=?2, closed_at=?3 WHERE id=?1",
             params![t.id, reason.trim(), now()],
         )?;
-        tx.execute(
+        self.conn.execute(
             "INSERT INTO tasks(id,title,source,source_ref,due,estimate_min,plan_date,state,carried_count,created_at,carried_from)
              VALUES(?1,?2,?3,?4,?5,?6,?7,'planned',?8,?9,?10)",
             params![
@@ -394,14 +583,24 @@ impl Store {
                 t.id
             ],
         )?;
-        tx.execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![to_date])?;
-        tx.commit()?;
+        self.ensure_day(to_date)?;
         self.get_task(&new_id)
+        })
     }
 
     /// Split into new tasks on `to_date`; the original is dropped with a split reason.
-    pub fn split(&self, id: &str, titles: &[String], reason: &str, to_date: &str) -> Result<Vec<Task>> {
+    pub fn split(
+        &self,
+        id: &str,
+        titles: &[String],
+        reason: &str,
+        to_date: &str,
+    ) -> Result<Vec<Task>> {
+        self.atomic(|| {
+        self.require_open_day(to_date)?;
+        if reason.trim().is_empty() { bail!("分割には理由が必須です"); }
         let t = self.get_task(id)?;
+        if let Some(date) = &t.plan_date { self.require_open_day(date)?; }
         if t.state.is_terminal() {
             bail!("「{}」は既に {} です", t.title, t.state.label_ja());
         }
@@ -409,30 +608,35 @@ impl Store {
         if titles.len() < 2 {
             bail!("分割先は 2 つ以上指定してください");
         }
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
+        self.conn.execute(
             "UPDATE tasks SET state='dropped', state_reason=?2, closed_at=?3 WHERE id=?1",
             params![t.id, format!("分割: {}", reason.trim()), now()],
         )?;
         let mut ids = Vec::new();
         for title in titles {
             let nid = new_id();
-            tx.execute(
+            self.conn.execute(
                 "INSERT INTO tasks(id,title,source,source_ref,due,estimate_min,plan_date,state,carried_count,created_at,carried_from)
                  VALUES(?1,?2,?3,?4,?5,NULL,?6,'planned',0,?7,?8)",
                 params![nid, title, t.source, t.source_ref, t.due, to_date, now(), t.id],
             )?;
             ids.push(nid);
         }
-        tx.execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![to_date])?;
-        tx.commit()?;
+        self.ensure_day(to_date)?;
         ids.iter().map(|i| self.get_task(i)).collect()
+        })
     }
 
     // ---------- candidates ----------
 
     /// Returns None when the source_ref was already rejected or already exists.
-    pub fn add_candidate(&self, title: &str, source: &str, source_ref: Option<&str>) -> Result<Option<Candidate>> {
+    pub fn add_candidate(
+        &self,
+        title: &str,
+        source: &str,
+        source_ref: Option<&str>,
+    ) -> Result<Option<Candidate>> {
+        self.atomic(|| {
         let title = title.trim();
         if title.is_empty() {
             bail!("タイトルが空です");
@@ -459,15 +663,19 @@ impl Store {
             params![id, title, source, source_ref, now()],
         )?;
         Ok(Some(self.get_candidate(&id)?))
+        })
     }
 
     pub fn get_candidate(&self, idish: &str) -> Result<Candidate> {
         let up = idish.trim().to_uppercase();
+        if up.is_empty() {
+            bail!("候補 ID を指定してください");
+        }
         let mut st = self.conn.prepare(
-            "SELECT id,title,source,source_ref,created_at,status FROM candidates WHERE id=?1 OR id LIKE ?2 OR id LIKE ?3",
+            "SELECT id,title,source,source_ref,created_at,status FROM candidates WHERE upper(id)=?1 OR substr(upper(id),1,length(?1))=?1 OR substr(upper(id),-length(?1))=?1",
         )?;
         let v: Vec<Candidate> = st
-            .query_map(params![up, format!("{up}%"), format!("%{up}")], row_to_candidate)?
+            .query_map(params![up], row_to_candidate)?
             .collect::<rusqlite::Result<_>>()?;
         match v.len() {
             0 => bail!("候補が見つかりません: {idish}"),
@@ -481,33 +689,52 @@ impl Store {
         let mut st = self.conn.prepare(
             "SELECT id,title,source,source_ref,created_at,status FROM candidates WHERE status='open' ORDER BY created_at",
         )?;
-        let v: Vec<Candidate> = st.query_map([], row_to_candidate)?.collect::<rusqlite::Result<_>>()?;
+        let v: Vec<Candidate> = st
+            .query_map([], row_to_candidate)?
+            .collect::<rusqlite::Result<_>>()?;
         Ok(v)
     }
 
     pub fn accept_candidate(&self, id: &str, plan_date: Option<&str>) -> Result<Task> {
-        let c = self.get_candidate(id)?;
-        if c.status != "open" {
-            bail!("候補「{}」は既に {} です", c.title, c.status);
-        }
-        let t = self.add_task(&c.title, None, None, &c.source, c.source_ref.as_deref(), plan_date)?;
-        self.conn.execute(
-            "UPDATE candidates SET status='accepted', task_id=?2 WHERE id=?1",
-            params![c.id, t.id],
-        )?;
-        Ok(t)
+        self.atomic(|| {
+            let c = self.get_candidate(id)?;
+            if c.status != "open" {
+                bail!("候補「{}」は既に {} です", c.title, c.status);
+            }
+            let t = self.add_task(
+                &c.title,
+                None,
+                None,
+                &c.source,
+                c.source_ref.as_deref(),
+                plan_date,
+            )?;
+            self.conn.execute(
+                "UPDATE candidates SET status='accepted', task_id=?2 WHERE id=?1",
+                params![c.id, t.id],
+            )?;
+            Ok(t)
+        })
     }
 
     pub fn reject_candidate(&self, id: &str) -> Result<()> {
-        let c = self.get_candidate(id)?;
-        if c.status != "open" {
-            bail!("候補「{}」は既に {} です", c.title, c.status);
-        }
-        self.conn.execute("UPDATE candidates SET status='rejected' WHERE id=?1", params![c.id])?;
-        if let Some(r) = c.source_ref {
-            self.conn.execute("INSERT OR IGNORE INTO rejected_refs(source_ref) VALUES(?1)", params![r])?;
-        }
-        Ok(())
+        self.atomic(|| {
+            let c = self.get_candidate(id)?;
+            if c.status != "open" {
+                bail!("候補「{}」は既に {} です", c.title, c.status);
+            }
+            self.conn.execute(
+                "UPDATE candidates SET status='rejected' WHERE id=?1",
+                params![c.id],
+            )?;
+            if let Some(r) = c.source_ref {
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO rejected_refs(source_ref) VALUES(?1)",
+                    params![r],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     // ---------- events ----------
