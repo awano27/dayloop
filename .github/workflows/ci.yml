@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: build release
+        run: cargo build --release
+      - name: test
+        run: cargo test --no-fail-fast
+      - name: smoke
+        shell: bash
+        env:
+          DAYLOOP_BIN: ${{ github.workspace }}/target/release/dayloop.exe
+        run: bash scripts/smoke.sh
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dayloop-windows-x64
+          path: target/release/dayloop.exe
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build
+      - name: test
+        run: cargo test

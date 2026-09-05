@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Smoke test for dayloop stage 1. Uses an isolated DAYLOOP_HOME.
+# Smoke test. Isolated DAYLOOP_HOME.
+#   bash scripts/smoke.sh
+#   DAYLOOP_BIN=/path/to/dayloop.exe bash scripts/smoke.sh
 set -u
 export DAYLOOP_HOME="$(dirname "$0")/dl-home"
 rm -rf "$DAYLOOP_HOME"

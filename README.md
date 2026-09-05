@@ -1,5 +1,11 @@
 # dayloop
 
+**What.** A local CLI that runs a daily plan → check → close → retro loop for tasks.
+**Why.** Zero-forgetting is enforced by ledger invariants, not by an LLM.
+**Requirements.** Windows 10/11; no admin rights. Classic Outlook is optional (COM intake).
+
+Repository: https://github.com/OWNER/dayloop
+
 1日のタスクを **計画 → 途中確認 → 確定 → 振り返り** で回す CLI。
 「できたのか・できていないのか・忘れているものは無いか」を、LLM ではなく台帳の不変条件で保証します。
 
@@ -118,6 +124,27 @@ cargo build --release
 
 `target/release/dayloop.exe` を任意のユーザーフォルダに置くだけで動きます。
 
+## インストール
+
+1. [Releases](https://github.com/OWNER/dayloop/releases) から zip をダウンロードして展開する
+2. `dayloop.exe` を任意のユーザーフォルダに置く（管理者権限は不要）
+3. SmartScreen が出たら「詳細情報 → 実行」で通る（管理者昇格は不要）
+4. 書き込み先は `%LOCALAPPDATA%\dayloop` のみ
+
+## 動作条件
+
+- Windows 10 / 11
+- 旧 Outlook（クラシック）がある場合のみ COM 取り込みが有効。無くても計画・確認・クローズ・MCP・常駐は動く
+
+## セキュリティ
+
+- ネットワーク送信なし
+- パスワード・トークンを扱わない
+- Outlook への書き込みなし（送信・既読化・フラグ変更をしない）
+- 本文・メールアドレスは既定で読まない
+
+判断の記録は [docs/decisions.md](docs/decisions.md)。
+
 ## ロードマップ
 
-仕様は [../dayloop-spec.md](../dayloop-spec.md)。段階3 まで（CLI + MCP + 常駐 + Outlook COM 取り込み）。以降は VS Code 拡張版、会議・アラート・勤怠、M365 Copilot 接続の順に入口を増やします。
+仕様は [../dayloop-spec.md](../dayloop-spec.md)。段階3 まで（CLI + MCP + 常駐 + Outlook COM 取り込み）は実装済み。段階4 以降（VS Code 拡張版、会議・アラート・勤怠、M365 Copilot 接続）は予定です。
