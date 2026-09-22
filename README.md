@@ -122,4 +122,4 @@ cargo build --release
 
 仕様は [../dayloop-spec.md](../dayloop-spec.md)。段階3 まで（CLI + MCP + 常駐 + Outlook COM 取り込み）がこのリポジトリの実装範囲。
 
-以降は [docs/plans/2026-09-22-roadmap.md](docs/plans/2026-09-22-roadmap.md)。判断は Jev に寄せ、本人は確信が足りない残りと、1日1回の確定だけを見る。開いたタスクが残る日を閉じる権限は台帳のまま。価値の説明は [docs/analysis/04-jev-product-value.md](docs/analysis/04-jev-product-value.md)。
+以降は [docs/plans/2026-09-22-roadmap.md](docs/plans/2026-09-22-roadmap.md)。人が入れた回答は判断グラフの枝になり、同じ状況は次から質問せず進む。Jev は枝が無いときだけの初回判断で、開いたタスクが残る日を閉じる権限は台帳のまま。成長の仕方は [docs/analysis/05-decision-graph.md](docs/analysis/05-decision-graph.md)。
