@@ -70,6 +70,33 @@ fn a_confident_candidate_becomes_an_edge_and_the_next_copy_is_not_asked() {
 }
 
 #[test]
+fn a_confident_tie_is_remembered() {
+    let home = Home::new();
+    let store = home.store();
+    let date = "2026-09-23";
+    store.add_task("甲", Some(date), Some(30), "manual", None, Some(date)).unwrap();
+    store.add_task("乙", Some(date), Some(30), "manual", None, Some(date)).unwrap();
+    struct Second;
+    impl Decider for Second {
+        fn decide(&mut self, _state: &str, choices: &[String]) -> JevOutcome {
+            if let Some(title) = choices.iter().find(|c| c.as_str() == "乙") {
+                JevOutcome::Answer { choice: title.clone(), confidence: 0.95 }
+            } else {
+                JevOutcome::Answer { choice: "ask".into(), confidence: 0.2 }
+            }
+        }
+    }
+    jev::grow(&store, date, &mut Second, 0.5).unwrap();
+    let titles: Vec<_> = dayloop::order::day_tasks(&store, date)
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.state == State::Planned || t.state == State::InProgress)
+        .map(|t| t.title)
+        .collect();
+    assert_eq!(titles.first().map(String::as_str), Some("乙"));
+}
+
+#[test]
 fn a_low_score_stays_a_question() {
     let home = Home::new();
     let store = home.store();

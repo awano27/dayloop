@@ -92,6 +92,7 @@ pub fn grow(
 ) -> Result<usize> {
     let mut n = grow_candidates(store, date, decider, floor)?;
     n += grow_tasks(store, date, decider, floor)?;
+    n += grow_order(store, date, decider, floor)?;
     Ok(n)
 }
 
@@ -182,6 +183,33 @@ fn grow_tasks(
         n += 1;
     }
     Ok(n)
+}
+
+fn grow_order(
+    store: &Store,
+    date: &str,
+    decider: &mut dyn Decider,
+    floor: f64,
+) -> Result<usize> {
+    let tasks = crate::order::day_tasks(store, date)?;
+    let spans = crate::order::spans_from_events(&store.events_for_day(date)?);
+    let Some((left, right)) = crate::order::first_open_tie(date, &tasks, &spans) else {
+        return Ok(0);
+    };
+    if graph::saved_first(store, &left.title, &right.title)?.is_some() {
+        return Ok(0);
+    }
+    let choices = vec![left.title.clone(), right.title.clone()];
+    let state = format!("order a={} b={}", left.title, right.title);
+    let JevOutcome::Answer { choice, confidence } = decider.decide(&state, &choices) else {
+        return Ok(0);
+    };
+    if confidence < floor || (choice != left.title && choice != right.title) {
+        return Ok(0);
+    }
+    let second = if choice == left.title { &right.title } else { &left.title };
+    graph::record_order(store, &choice, second)?;
+    Ok(1)
 }
 
 fn split_disposition(choice: &str) -> Option<(&str, Option<&str>)> {

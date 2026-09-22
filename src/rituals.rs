@@ -295,6 +295,9 @@ fn print_jev_hints(store: &Store, date: &str) {
     };
     let spans = crate::order::spans_from_events(&store.events_for_day(date).unwrap_or_default());
     if let Some((a, b)) = crate::order::first_open_tie(date, &tasks, &spans) {
+        if crate::graph::saved_first(store, &a.title, &b.title).ok().flatten().is_some() {
+            return;
+        }
         if let Some(choice) = crate::order::tie_hint(&mut decider, &a.title, &b.title) {
             let other = if choice == a.title { &b.title } else { &a.title };
             println!("  順番のヒント: 「{choice}」を先に。覚えるには prefer {choice} {other}");

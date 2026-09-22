@@ -115,19 +115,60 @@ pub fn from_source(source: &mut dyn DecisionSource, text: &str) -> Vec<MinuteLin
         .collect()
 }
 
-/// Model output is accepted only through [`from_source`]. An empty route yields no lines.
-pub struct LlmMinutes {
-    pub route: String,
+/// Lines the rules already classified stay as they are.
+/// Each remaining line is one closed choice: 決定, 共有, or 無視.
+pub fn judge_ignored(
+    text: &str,
+    decider: &mut dyn crate::jev::Decider,
+    floor: f64,
+) -> Vec<MinuteLine> {
+    let choices = vec!["決定".to_string(), "共有".to_string(), "無視".to_string()];
+    let ruled = read_minutes(text);
+    let raws: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_heading(line))
+        .collect();
+    ruled
+        .into_iter()
+        .zip(raws)
+        .map(|(line, raw)| match line {
+            MinuteLine::Ignore => {
+                let body = raw.trim_start_matches(['-', '*']).trim();
+                if body.is_empty() {
+                    MinuteLine::Ignore
+                } else {
+                    judge_one(decider, &choices, floor, body)
+                }
+            }
+            other => other,
+        })
+        .collect()
 }
 
-impl DecisionSource for LlmMinutes {
-    fn statements(&mut self, _text: &str) -> Vec<String> {
-        // A non-empty route still returns nothing here. Lines would have to pass
-        // `from_source` before they could become candidates, and no response shape
-        // is accepted yet.
-        let _ = &self.route;
-        Vec::new()
+fn judge_one(
+    decider: &mut dyn crate::jev::Decider,
+    choices: &[String],
+    floor: f64,
+    body: &str,
+) -> MinuteLine {
+    match decider.decide(body, choices) {
+        crate::jev::JevOutcome::Answer { choice, confidence }
+            if confidence >= floor && choice == "決定" =>
+        {
+            MinuteLine::Action(body.to_string())
+        }
+        crate::jev::JevOutcome::Answer { choice, confidence }
+            if confidence >= floor && choice == "共有" =>
+        {
+            MinuteLine::Info
+        }
+        _ => MinuteLine::Ignore,
     }
+}
+
+fn is_heading(line: &str) -> bool {
+    matches!(line, "決定事項" | "# 決定事項" | "共有事項" | "# 共有事項") || line.starts_with('#')
 }
 
 pub struct MinuteReport {
@@ -138,11 +179,13 @@ pub struct MinuteReport {
 
 pub fn ingest(store: &Store, text: &str) -> Result<MinuteReport> {
     let cfg = crate::config::load();
-    let lines = if cfg.minutes.generator.eq_ignore_ascii_case("llm") {
-        let mut source = LlmMinutes {
+    let lines = if cfg.minutes.generator.eq_ignore_ascii_case("llm") && jev_ready(&cfg) {
+        let mut decider = crate::jev::HttpDecider {
             route: cfg.jev.route.clone(),
+            timeout_ms: cfg.jev.timeout_ms,
         };
-        from_source(&mut source, text)
+        let floor = cfg.jev.commit_confidence.unwrap_or(crate::jev::DEFAULT_FLOOR);
+        judge_ignored(text, &mut decider, floor)
     } else {
         read_minutes(text)
     };
@@ -167,6 +210,15 @@ pub fn ingest(store: &Store, text: &str) -> Result<MinuteReport> {
         }
     }
     Ok(report)
+}
+
+fn jev_ready(cfg: &crate::config::Config) -> bool {
+    if !cfg.jev.mode.eq_ignore_ascii_case("on") || cfg.jev.route.trim().is_empty() {
+        return false;
+    }
+    std::env::var("DAYLOOP_JEV_API_KEY")
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -196,6 +248,25 @@ mod tests {
         fn statements(&mut self, _text: &str) -> Vec<String> {
             self.lines.clone()
         }
+    }
+
+    #[test]
+    fn an_unmarked_line_becomes_an_action_only_when_jev_says_so() {
+        struct Pick;
+        impl crate::jev::Decider for Pick {
+            fn decide(&mut self, state: &str, _choices: &[String]) -> crate::jev::JevOutcome {
+                if state == "見積を直す" {
+                    crate::jev::JevOutcome::Answer { choice: "決定".into(), confidence: 0.9 }
+                } else {
+                    crate::jev::JevOutcome::Answer { choice: "無視".into(), confidence: 0.9 }
+                }
+            }
+        }
+        let lines = judge_ignored("見積を直す\n雑談\n", &mut Pick, 0.5);
+        assert_eq!(
+            lines,
+            vec![MinuteLine::Action("見積を直す".into()), MinuteLine::Ignore]
+        );
     }
 
     #[test]
