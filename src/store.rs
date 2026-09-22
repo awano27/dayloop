@@ -492,6 +492,15 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn mark_observed(&self, id: &str, source_ref: &str) -> Result<()> {
+        let marker = format!("observe:{source_ref}");
+        self.conn.execute(
+            "UPDATE tasks SET decided_by=?2, evidence=?3 WHERE id=?1",
+            params![id, marker, marker],
+        )?;
+        Ok(())
+    }
+
     /// The still-open task created by carrying `parent_id`, if one exists.
     pub(crate) fn open_child(&self, parent_id: &str) -> Result<Option<Task>> {
         let parent = self.get_task(parent_id)?;

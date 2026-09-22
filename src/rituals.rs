@@ -306,8 +306,17 @@ fn option_labels(q: &Question) -> Vec<&str> {
     q.options.iter().map(|o| o.label.as_str()).collect()
 }
 
+fn apply_observations(store: &Store, date: &str) -> Result<()> {
+    let cfg = crate::config::load();
+    let map = crate::observe::load_map(&cfg.observe)?;
+    let now = chrono::Local::now().format("%H:%M").to_string();
+    crate::observe::apply_day(store, date, &map, &now)?;
+    Ok(())
+}
+
 /// Evening: every open task becomes done / not_done / carried / dropped, then the day closes.
 pub fn close_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
+    apply_observations(store, date)?;
     graph::apply_known_tasks(store, date)?;
     print_jev_hints(store, date);
     let open = crate::order::day_tasks(store, date)?
@@ -376,6 +385,7 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
         println!();
     }
 
+    apply_observations(store, date)?;
     graph::apply_known_candidates(store, date)?;
     graph::apply_known_tasks(store, date)?;
 
@@ -443,6 +453,7 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
 
 /// Midday: untouched tasks get a decision.
 pub fn check_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
+    apply_observations(store, date)?;
     graph::apply_known_tasks(store, date)?;
     let open = crate::order::day_tasks(store, date)?
         .into_iter()

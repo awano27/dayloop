@@ -27,6 +27,9 @@ mode = "off"
 route = ""
 timeout_ms = 2000
 send_body = false
+
+[observe]
+fixture = ""
 "#;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -39,6 +42,14 @@ pub struct Config {
     pub intake: IntakeConfig,
     #[serde(default)]
     pub jev: JevConfig,
+    #[serde(default)]
+    pub observe: ObserveConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ObserveConfig {
+    #[serde(default)]
+    pub fixture: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

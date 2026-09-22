@@ -64,7 +64,11 @@ pub fn dispatch(store: &Store, name: &str, args: &Value) -> Value {
 fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
     match name {
         "get_today" => engine::today_view(store, &date_arg(args)?),
-        "plan_day" => engine::plan_view(store, &date_arg(args)?),
+        "plan_day" => {
+            let d = date_arg(args)?;
+            observe_first(store, &d)?;
+            engine::plan_view(store, &d)
+        }
         "confirm_plan" => {
             let d = date_arg(args)?;
             store.confirm_plan(&d)?;
@@ -179,9 +183,14 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
             markdown::export(store, &to)?;
             Ok(serde_json::to_value(news)?)
         }
-        "check_in" => engine::check_view(store, &date_arg(args)?),
+        "check_in" => {
+            let d = date_arg(args)?;
+            observe_first(store, &d)?;
+            engine::check_view(store, &d)
+        }
         "close_day" => {
             let d = date_arg(args)?;
+            observe_first(store, &d)?;
             let open = store.open_tasks_for_day(&d)?;
             if !open.is_empty() {
                 return engine::close_view(store, &d);
@@ -247,6 +256,14 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
         }
         _ => anyhow::bail!("unknown tool: {name}"),
     }
+}
+
+fn observe_first(store: &Store, date: &str) -> Result<()> {
+    let cfg = crate::config::load();
+    let map = crate::observe::load_map(&cfg.observe)?;
+    let now = chrono::Local::now().format("%H:%M").to_string();
+    crate::observe::apply_day(store, date, &map, &now)?;
+    Ok(())
 }
 
 fn export_task(store: &Store, t: &crate::model::Task) -> Result<()> {

@@ -6,6 +6,7 @@ pub mod engine;
 pub mod facts;
 pub mod graph;
 pub mod order;
+pub mod observe;
 pub mod intake;
 pub mod jev;
 pub mod markdown;
