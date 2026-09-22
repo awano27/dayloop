@@ -283,6 +283,31 @@ pub fn state_line(store: &Store, sit: &Situation) -> Result<String> {
     Ok(line)
 }
 
+pub fn order_node_key(a: &str, b: &str) -> String {
+    let (x, y) = if a <= b { (a, b) } else { (b, a) };
+    format!("{x}\n{y}")
+}
+
+pub fn record_order(store: &Store, first: &str, second: &str) -> Result<()> {
+    if first == second || first.trim().is_empty() || second.trim().is_empty() {
+        anyhow::bail!("2つの違うタイトルが必要です");
+    }
+    let node = node_id(store, "order", &order_node_key(first, second))?;
+    activate(store, &node, first, None)?;
+    Ok(())
+}
+
+pub fn saved_first(store: &Store, a: &str, b: &str) -> Result<Option<String>> {
+    let Some(edge) = active_edge(store, "order", &order_node_key(a, b))? else {
+        return Ok(None);
+    };
+    if edge.to_choice == a || edge.to_choice == b {
+        Ok(Some(edge.to_choice))
+    } else {
+        Ok(None)
+    }
+}
+
 fn reason_text(edge: &Learned) -> Option<String> {
     edge.reason_code.as_deref().map(reason::reason_for_ledger)
 }

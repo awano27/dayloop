@@ -32,6 +32,17 @@ pub fn list() -> Vec<Value> {
         tool("export_markdown", "指定日の Markdown を書き出し、パスを返す。", obj(&[("date", str_date())], &[])),
         tool("import_markdown", "指定日の Markdown の手編集を取り込む。[x] は完了、新しい - [ ] は追加。", obj(&[("date", str_date())], &[])),
         tool("sync_sources", "有効な取り込みアダプタを実行する。Outlook が無い環境でも部分失敗を返し、isError にはしない。", obj(&[], &[])),
+        tool(
+            "prefer_order",
+            "同順位の2件について、先にやるタイトルを覚える。",
+            obj(
+                &[
+                    ("first", schema("string", "先にやるタイトル")),
+                    ("second", schema("string", "あとでやるタイトル")),
+                ],
+                &["first", "second"],
+            ),
+        ),
     ]
 }
 
@@ -227,6 +238,12 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
         "sync_sources" => {
             let cfg = crate::config::load();
             Ok(crate::intake::sync_all_json(store, &cfg))
+        }
+        "prefer_order" => {
+            let first = req_str(args, "first")?;
+            let second = req_str(args, "second")?;
+            crate::graph::record_order(store, &first, &second)?;
+            Ok(json!({ "first": first, "second": second }))
         }
         _ => anyhow::bail!("unknown tool: {name}"),
     }

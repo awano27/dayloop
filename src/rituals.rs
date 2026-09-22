@@ -122,7 +122,7 @@ fn meta(t: &Task) -> String {
 
 pub fn print_day(store: &Store, date: &str) -> Result<()> {
     let day = store.get_day(date)?;
-    let tasks = store.tasks_for_day(date)?;
+    let tasks = crate::order::day_tasks(store, date)?;
     let open = tasks.iter().filter(|t| t.state.is_open()).count();
     println!("== {date}");
     match &day {
@@ -289,6 +289,17 @@ fn print_jev_hints(store: &Store, date: &str) {
             row.title, row.choice, row.confidence
         );
     }
+    let tasks = match crate::order::day_tasks(store, date) {
+        Ok(tasks) => tasks,
+        Err(_) => return,
+    };
+    let spans = crate::order::spans_from_events(&store.events_for_day(date).unwrap_or_default());
+    if let Some((a, b)) = crate::order::first_open_tie(date, &tasks, &spans) {
+        if let Some(choice) = crate::order::tie_hint(&mut decider, &a.title, &b.title) {
+            let other = if choice == a.title { &b.title } else { &a.title };
+            println!("  順番のヒント: 「{choice}」を先に。覚えるには prefer {choice} {other}");
+        }
+    }
 }
 
 fn option_labels(q: &Question) -> Vec<&str> {
@@ -299,7 +310,10 @@ fn option_labels(q: &Question) -> Vec<&str> {
 pub fn close_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     graph::apply_known_tasks(store, date)?;
     print_jev_hints(store, date);
-    let open = store.open_tasks_for_day(date)?;
+    let open = crate::order::day_tasks(store, date)?
+        .into_iter()
+        .filter(|t| t.state.is_open())
+        .collect::<Vec<_>>();
     println!("== {date} のクローズ: 未確定 {} 件", open.len());
     let mut pending = 0usize;
     for t in open {
@@ -430,7 +444,10 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
 /// Midday: untouched tasks get a decision.
 pub fn check_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     graph::apply_known_tasks(store, date)?;
-    let open = store.open_tasks_for_day(date)?;
+    let open = crate::order::day_tasks(store, date)?
+        .into_iter()
+        .filter(|t| t.state.is_open())
+        .collect::<Vec<_>>();
     let doing: Vec<&Task> = open.iter().filter(|t| t.state == State::InProgress).collect();
     let untouched: Vec<&Task> = open.iter().filter(|t| t.state == State::Planned).collect();
     println!("== {date} の途中確認: 未着手 {} 件 / 進行中 {} 件", untouched.len(), doing.len());

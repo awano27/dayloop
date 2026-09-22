@@ -3,6 +3,8 @@ use clap::{Parser, Subcommand};
 
 use dayloop::config;
 use dayloop::doctor;
+use dayloop::graph;
+use dayloop::order;
 use dayloop::markdown;
 use dayloop::mcp;
 use dayloop::model;
@@ -35,6 +37,16 @@ enum Cmd {
     Today {
         #[arg(long)]
         date: Option<String>,
+    },
+    /// 次に手を付ける未完了タスクを1件出す
+    Next {
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// 同順位の2件について、先にやるタイトルを覚える
+    Prefer {
+        first: String,
+        second: String,
     },
     /// タスクを追加（既定は今日の予定）
     Add {
@@ -271,6 +283,24 @@ fn run() -> Result<i32> {
         Cmd::Today { date } => {
             let d = resolve_date(date.as_deref())?;
             rituals::print_day(&store, &d)?;
+            0
+        }
+        Cmd::Next { date } => {
+            let date = resolve_date(date.as_deref())?;
+            match order::next_open(&store, &date)? {
+                Some(t) => {
+                    println!("{}  {}", t.id, t.title);
+                    0
+                }
+                None => {
+                    println!("{date} に未完了はありません");
+                    0
+                }
+            }
+        }
+        Cmd::Prefer { first, second } => {
+            graph::record_order(&store, &first, &second)?;
+            println!("覚えました: 「{first}」を「{second}」より先");
             0
         }
         Cmd::Add { title, due, estimate, date, backlog } => {
