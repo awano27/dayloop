@@ -21,6 +21,12 @@ keywords = ["お願い", "ご対応", "ご確認", "依頼", "までに", "締�
 important_senders = []
 meeting_prep = true
 meeting_prep_only_required = true
+
+[jev]
+mode = "off"
+route = ""
+timeout_ms = 2000
+send_body = false
 "#;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -31,6 +37,8 @@ pub struct Config {
     pub notify: Notify,
     #[serde(default)]
     pub intake: IntakeConfig,
+    #[serde(default)]
+    pub jev: JevConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +143,41 @@ fn default_lookback() -> i64 {
 fn default_true() -> bool {
     true
 }
+#[derive(Debug, Clone, Deserialize)]
+pub struct JevConfig {
+    #[serde(default = "default_jev_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub route: String,
+    #[serde(default = "default_jev_timeout")]
+    pub timeout_ms: u64,
+    /// Set only after the eval sheet in docs/jev-eval.md. Absent means no auto-commit.
+    #[serde(default)]
+    pub commit_confidence: Option<f64>,
+    #[serde(default)]
+    pub send_body: bool,
+}
+
+impl Default for JevConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_jev_mode(),
+            route: String::new(),
+            timeout_ms: default_jev_timeout(),
+            commit_confidence: None,
+            send_body: false,
+        }
+    }
+}
+
+fn default_jev_mode() -> String {
+    "off".into()
+}
+
+fn default_jev_timeout() -> u64 {
+    2000
+}
+
 fn default_keywords() -> Vec<String> {
     [
         "お願い",

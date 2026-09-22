@@ -27,7 +27,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   evidence TEXT,
   created_at TEXT NOT NULL,
   closed_at TEXT,
-  carried_from TEXT
+  carried_from TEXT,
+  proposed_state TEXT,
+  proposed_reason_code TEXT,
+  proposal_confidence REAL,
+  state_note TEXT,
+  decided_by TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_plan_date ON tasks(plan_date);
 CREATE TABLE IF NOT EXISTS days (
@@ -63,7 +68,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_date ON events(date);
 "#;
 
-const TASK_COLS: &str = "id,title,source,source_ref,due,estimate_min,plan_date,state,state_reason,carried_count,evidence,created_at,closed_at";
+const TASK_COLS: &str = "id,title,source,source_ref,due,estimate_min,plan_date,state,state_reason,carried_count,evidence,created_at,closed_at,carried_from,proposed_state,proposed_reason_code,proposal_confidence,state_note,decided_by";
 
 #[derive(Debug)]
 pub struct CarryBlocked {
@@ -98,6 +103,12 @@ fn row_to_task(r: &Row) -> rusqlite::Result<Task> {
         evidence: r.get("evidence")?,
         created_at: r.get("created_at")?,
         closed_at: r.get("closed_at")?,
+        carried_from: r.get("carried_from")?,
+        proposed_state: r.get("proposed_state")?,
+        proposed_reason_code: r.get("proposed_reason_code")?,
+        proposal_confidence: r.get("proposal_confidence")?,
+        state_note: r.get("state_note")?,
+        decided_by: r.get("decided_by")?,
     })
 }
 
@@ -127,7 +138,12 @@ impl Store {
         let conn = Connection::open(paths::db_path())?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Store { conn })
+    }
+
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.conn
     }
 
     fn query_tasks(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<Task>> {
@@ -164,7 +180,13 @@ impl Store {
             .optional()?)
     }
 
+    /// Invariant 5: today's plan cannot be confirmed while an earlier day still has open tasks.
     pub fn confirm_plan(&self, date: &str) -> Result<()> {
+        for d in self.unclosed_days_before(date)? {
+            if !self.open_tasks_for_day(&d)?.is_empty() {
+                bail!("{d} が未確定です。先にその日を閉じてください");
+            }
+        }
         self.ensure_day(date)?;
         self.conn.execute(
             "UPDATE days SET plan_confirmed_at=?2 WHERE date=?1",
@@ -319,12 +341,34 @@ impl Store {
     }
 
     /// Invariant 2: not_done / dropped require a reason. Carry goes through carry_over.
+    /// A human call grows the decision graph. Graph replay uses [`Self::transition_silent`].
     pub fn transition(
         &self,
         id: &str,
         to: State,
         reason: Option<&str>,
         evidence: Option<&str>,
+    ) -> Result<Task> {
+        self.transition_in(id, to, reason, evidence, true)
+    }
+
+    pub(crate) fn transition_silent(
+        &self,
+        id: &str,
+        to: State,
+        reason: Option<&str>,
+        evidence: Option<&str>,
+    ) -> Result<Task> {
+        self.transition_in(id, to, reason, evidence, false)
+    }
+
+    fn transition_in(
+        &self,
+        id: &str,
+        to: State,
+        reason: Option<&str>,
+        evidence: Option<&str>,
+        learn: bool,
     ) -> Result<Task> {
         let t = self.get_task(id)?;
         if t.state.is_terminal() {
@@ -336,14 +380,26 @@ impl Store {
         if to.needs_reason() && reason.map(|r| r.trim().is_empty()).unwrap_or(true) {
             bail!("{} には理由が必須です", to.label_ja());
         }
+        let stored_reason = match reason {
+            Some(r) if !r.trim().is_empty() => Some(crate::reason::reason_for_ledger(
+                &crate::reason::canonical_code(r)?,
+            )),
+            _ => None,
+        };
         if to == State::InProgress && t.plan_date.is_none() {
             bail!("未計画のタスクは先に予定へ入れてください（plan か start --date）");
         }
         let closed = if to.is_terminal() { Some(now()) } else { None };
         self.conn.execute(
             "UPDATE tasks SET state=?2, state_reason=?3, evidence=COALESCE(?4, evidence), closed_at=?5 WHERE id=?1",
-            params![t.id, to.as_str(), reason.map(str::trim), evidence, closed],
+            params![t.id, to.as_str(), stored_reason, evidence, closed],
         )?;
+        if learn {
+            if let Some(choice) = choice_of(to) {
+                let code = reason.and_then(|r| crate::reason::canonical_code(r).ok());
+                crate::graph::record(self, &crate::graph::Situation::from_task(&t, "close"), choice, code.as_deref())?;
+            }
+        }
         self.get_task(&t.id)
     }
 
@@ -356,13 +412,33 @@ impl Store {
         to_date: &str,
         reschedule_due: Option<&str>,
     ) -> Result<Task> {
+        self.carry_in(id, reason, to_date, reschedule_due, true)
+    }
+
+    pub(crate) fn carry_over_silent(
+        &self,
+        id: &str,
+        reason: &str,
+        to_date: &str,
+        reschedule_due: Option<&str>,
+    ) -> Result<Task> {
+        self.carry_in(id, reason, to_date, reschedule_due, false)
+    }
+
+    fn carry_in(
+        &self,
+        id: &str,
+        reason: &str,
+        to_date: &str,
+        reschedule_due: Option<&str>,
+        learn: bool,
+    ) -> Result<Task> {
         let t = self.get_task(id)?;
         if !t.state.is_open() && t.state != State::Backlog {
             bail!("「{}」は既に {} です", t.title, t.state.label_ja());
         }
-        if reason.trim().is_empty() {
-            bail!("持ち越しには理由が必須です");
-        }
+        let code = crate::reason::canonical_code(reason)?;
+        let ledger = crate::reason::reason_for_ledger(&code);
         let mut count = t.carried_count;
         let mut due = t.due.clone();
         if let Some(d) = reschedule_due {
@@ -376,7 +452,7 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE tasks SET state='carried', state_reason=?2, closed_at=?3 WHERE id=?1",
-            params![t.id, reason.trim(), now()],
+            params![t.id, ledger, now()],
         )?;
         tx.execute(
             "INSERT INTO tasks(id,title,source,source_ref,due,estimate_min,plan_date,state,carried_count,created_at,carried_from)
@@ -396,7 +472,81 @@ impl Store {
         )?;
         tx.execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![to_date])?;
         tx.commit()?;
+        if learn {
+            crate::graph::record(
+                self,
+                &crate::graph::Situation::from_task(&t, "close"),
+                "carry",
+                Some(&code),
+            )?;
+        }
         self.get_task(&new_id)
+    }
+
+    pub(crate) fn mark_decided(&self, id: &str, edge_id: &str) -> Result<()> {
+        let t = self.get_task(id)?;
+        self.conn.execute(
+            "UPDATE tasks SET decided_by=?2 WHERE id=?1",
+            params![t.id, format!("graph:{edge_id}")],
+        )?;
+        Ok(())
+    }
+
+    /// The still-open task created by carrying `parent_id`, if one exists.
+    pub(crate) fn open_child(&self, parent_id: &str) -> Result<Option<Task>> {
+        let parent = self.get_task(parent_id)?;
+        let v = self.query_tasks(
+            &format!(
+                "SELECT {TASK_COLS} FROM tasks WHERE carried_from=?1 AND state IN ('planned','in_progress') ORDER BY created_at DESC"
+            ),
+            &[&parent.id],
+        )?;
+        Ok(v.into_iter().next())
+    }
+
+    /// Record a suggestion. The task stays open until [`Self::commit_proposal`].
+    pub fn set_proposal(
+        &self,
+        id: &str,
+        state: State,
+        reason: Option<&str>,
+        confidence: Option<f64>,
+    ) -> Result<Task> {
+        let t = self.get_task(id)?;
+        let code = match reason {
+            Some(r) if !r.trim().is_empty() => Some(crate::reason::canonical_code(r)?),
+            _ => None,
+        };
+        self.conn.execute(
+            "UPDATE tasks SET proposed_state=?2, proposed_reason_code=?3, proposal_confidence=?4 WHERE id=?1",
+            params![t.id, state.as_str(), code, confidence],
+        )?;
+        self.get_task(&t.id)
+    }
+
+    /// Turn a stored proposal into a silent ledger move, then clear the proposal columns.
+    pub fn commit_proposal(&self, id: &str) -> Result<Task> {
+        let t = self.get_task(id)?;
+        let Some(proposed) = t.proposed_state.clone() else {
+            bail!("提案がありません");
+        };
+        let Some(to) = State::parse(&proposed) else {
+            bail!("未知の提案状態: {proposed}");
+        };
+        let reason = t.proposed_reason_code.clone();
+        if to == State::Carried {
+            let base = t.plan_date.clone().unwrap_or_else(crate::util::today);
+            let dest = crate::util::next_workday(&base)?;
+            let r = reason.unwrap_or_else(|| "待ち".to_string());
+            self.carry_over_silent(&t.id, &r, &dest, None)?;
+        } else {
+            self.transition_silent(&t.id, to, reason.as_deref(), None)?;
+        }
+        self.conn.execute(
+            "UPDATE tasks SET proposed_state=NULL, proposed_reason_code=NULL, proposal_confidence=NULL WHERE id=?1",
+            params![t.id],
+        )?;
+        self.get_task(&t.id)
     }
 
     /// Split into new tasks on `to_date`; the original is dropped with a split reason.
@@ -486,6 +636,14 @@ impl Store {
     }
 
     pub fn accept_candidate(&self, id: &str, plan_date: Option<&str>) -> Result<Task> {
+        self.accept_in(id, plan_date, true)
+    }
+
+    pub(crate) fn accept_candidate_silent(&self, id: &str, plan_date: Option<&str>) -> Result<Task> {
+        self.accept_in(id, plan_date, false)
+    }
+
+    fn accept_in(&self, id: &str, plan_date: Option<&str>, learn: bool) -> Result<Task> {
         let c = self.get_candidate(id)?;
         if c.status != "open" {
             bail!("候補「{}」は既に {} です", c.title, c.status);
@@ -495,17 +653,75 @@ impl Store {
             "UPDATE candidates SET status='accepted', task_id=?2 WHERE id=?1",
             params![c.id, t.id],
         )?;
+        if learn {
+            let choice = if plan_date.is_some() { "today" } else { "backlog" };
+            let anchor = plan_date
+                .map(|s| s.to_string())
+                .unwrap_or_else(crate::util::today);
+            crate::graph::record(
+                self,
+                &crate::graph::Situation::intake(&c.title, &c.source, &anchor),
+                choice,
+                None,
+            )?;
+        }
         Ok(t)
     }
 
     pub fn reject_candidate(&self, id: &str) -> Result<()> {
+        self.reject_in(id, true)
+    }
+
+    pub(crate) fn reject_candidate_silent(&self, id: &str) -> Result<()> {
+        self.reject_in(id, false)
+    }
+
+    fn reject_in(&self, id: &str, learn: bool) -> Result<()> {
         let c = self.get_candidate(id)?;
         if c.status != "open" {
             bail!("候補「{}」は既に {} です", c.title, c.status);
         }
         self.conn.execute("UPDATE candidates SET status='rejected' WHERE id=?1", params![c.id])?;
-        if let Some(r) = c.source_ref {
-            self.conn.execute("INSERT OR IGNORE INTO rejected_refs(source_ref) VALUES(?1)", params![r])?;
+        if let Some(r) = &c.source_ref {
+            self.conn
+                .execute("INSERT OR IGNORE INTO rejected_refs(source_ref) VALUES(?1)", params![r])?;
+        }
+        if learn {
+            let anchor = crate::util::today();
+            crate::graph::record(
+                self,
+                &crate::graph::Situation::intake(&c.title, &c.source, &anchor),
+                "reject",
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Park a candidate. The row stays, and `rejected_refs` is left untouched.
+    pub fn shelve_candidate(&self, id: &str) -> Result<()> {
+        self.shelve_in(id, true)
+    }
+
+    pub(crate) fn shelve_candidate_silent(&self, id: &str) -> Result<()> {
+        self.shelve_in(id, false)
+    }
+
+    fn shelve_in(&self, id: &str, learn: bool) -> Result<()> {
+        let c = self.get_candidate(id)?;
+        if c.status != "open" {
+            bail!("候補「{}」は既に {} です", c.title, c.status);
+        }
+        self.conn
+            .execute("UPDATE candidates SET status='shelved' WHERE id=?1", params![c.id])?;
+        if learn {
+            let anchor = crate::util::today();
+            crate::graph::record(
+                self,
+                &crate::graph::Situation::intake(&c.title, &c.source, &anchor),
+                "shelve",
+                None,
+            )?;
         }
         Ok(())
     }
@@ -559,4 +775,42 @@ impl Store {
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+fn choice_of(to: State) -> Option<&'static str> {
+    match to {
+        State::Done => Some("done"),
+        State::NotDone => Some("not_done"),
+        State::Dropped => Some("drop"),
+        State::InProgress => Some("start"),
+        _ => None,
+    }
+}
+
+fn migrate(conn: &Connection) -> Result<()> {
+    for (column, decl) in [
+        ("carried_from", "TEXT"),
+        ("proposed_state", "TEXT"),
+        ("proposed_reason_code", "TEXT"),
+        ("proposal_confidence", "REAL"),
+        ("state_note", "TEXT"),
+        ("decided_by", "TEXT"),
+    ] {
+        ensure_column(conn, "tasks", column, decl)?;
+    }
+    conn.execute_batch(crate::graph::GRAPH_SCHEMA)?;
+    conn.pragma_update(None, "user_version", 2)?;
+    Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if names.iter().any(|n| n.eq_ignore_ascii_case(column)) {
+        return Ok(());
+    }
+    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])?;
+    Ok(())
 }

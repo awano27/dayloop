@@ -123,6 +123,11 @@ pub fn ingest(
         markdown::export(store, &ds)?;
     }
 
+    if !dry_run {
+        let today = now.format("%Y-%m-%d").to_string();
+        crate::graph::apply_known_candidates(store, &today)?;
+    }
+
     Ok(SyncResult {
         name: src.name().to_string(),
         ok: true,

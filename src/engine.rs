@@ -200,8 +200,12 @@ pub fn plan_view(store: &Store, date: &str) -> Result<Value> {
     let unclosed = store.unclosed_days_before(date)?;
     let mut unclosed_out = Vec::new();
     let mut questions = Vec::new();
+    let mut earlier_open = false;
     for d in &unclosed {
         let open = store.open_tasks_for_day(d)?;
+        if !open.is_empty() {
+            earlier_open = true;
+        }
         unclosed_out.push(json!({ "date": d, "open": open }));
         for t in &open {
             questions.push(Question::close_task(t));
@@ -221,7 +225,9 @@ pub fn plan_view(store: &Store, date: &str) -> Result<Value> {
 
     let planned = store.tasks_for_day(date)?;
     let n_open = store.open_tasks_for_day(date)?.len();
-    questions.push(Question::confirm_plan(date, n_open));
+    if !earlier_open {
+        questions.push(Question::confirm_plan(date, n_open));
+    }
 
     let events = store.events_for_day(date)?;
     Ok(json!({

@@ -220,6 +220,11 @@ pub fn run() {
         Err(_) => info("LLM エンドポイント", "未設定（テンプレート出力で動作します）"),
     }
 
+    match std::env::var("DAYLOOP_JEV_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => ok("Jev", "API キーは設定されています"),
+        _ => info("Jev", "API キー未設定（未知の節は質問のまま）"),
+    }
+
     println!();
     if prefer_vscode {
         println!("推奨: VS Code 拡張版。exe 版は現時点では動いていますが、ポリシー更新で止まる可能性があります。");

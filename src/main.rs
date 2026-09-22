@@ -100,6 +100,14 @@ enum Cmd {
         #[arg(long)]
         reason: String,
     },
+    /// 学習した枝を書き換え、開いている対象へすぐ適用する
+    Revise {
+        id: String,
+        /// done | not_done | carry | drop | start | shelve | today | backlog | reject
+        choice: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// 分割（元は取り下げ、分割先は次の営業日の予定）
     Split {
         id: String,
@@ -337,6 +345,27 @@ fn run() -> Result<i32> {
             export_for(&store, &t)?;
             0
         }
+        Cmd::Revise { id, choice, reason } => match choice.as_str() {
+            "shelve" | "today" | "backlog" | "reject" => {
+                let c = store.revise_candidate(&id, &choice)?;
+                println!("枝を更新: {}  {}  -> {choice}", short(&c.id), c.title);
+                0
+            }
+            "done" | "not_done" | "carry" | "drop" | "start" => {
+                let t = store.revise_task(&id, &choice, reason.as_deref())?;
+                println!(
+                    "枝を更新: {}  {}  [{}]",
+                    short(&t.id),
+                    t.title,
+                    t.state.label_ja()
+                );
+                export_for(&store, &t)?;
+                0
+            }
+            other => {
+                anyhow::bail!("選択肢が不正です: {other}");
+            }
+        },
         Cmd::Split { id, reason, into, to } => {
             let old = store.get_task(&id)?;
             let base = old.plan_date.clone().unwrap_or_else(util::today);
