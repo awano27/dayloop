@@ -19,3 +19,7 @@
 | フィクスチャ | `fixtures/outlook/intake.toml` を重ねて `important_senders = ["田中"]` | デモ 4 ルールを default config だけに依存させない |
 | Outlook COM 実機 | **未検証**。開発 PC は COM 未検出・新しい Outlook のみ。コンパイルと ProgID 失敗時の終了コード 0 だけ確認 | 指示どおり実機なしで書く |
 | フィクスチャの基準時刻注入 | `FixtureSource::load_at(dir, now)`。`load` は `Local::now()` を渡すだけ。テストは 09:00 固定 | `start_offset_minutes` が実行時刻に依存し、22:00 以降で翌日に落ちていた |
+
+# 段階3.1以降
+
+未決の論点は [plans/2026-09-22-roadmap.md](plans/2026-09-22-roadmap.md) の「決定を後に残すもの」。選んだあとに、この表へ行を足す。
