@@ -7,6 +7,8 @@
 - LLM は M365 Copilot / GitHub Copilot / ローカル LLM のどれでも。無くても動く
 - 当日分は Markdown にも書き出され、手で編集して取り込める
 
+できることと、朝から夕までの操作は [docs/guide.md](docs/guide.md) にまとめてある。
+
 ## 不変条件（コードで強制）
 
 1. 今日のタスクが全件「完了・未完了・持ち越し・取り下げ」になるまで、その日は閉じられない
@@ -19,6 +21,7 @@
 
 ```bash
 dayloop plan     # 朝: 前日の未確定 → 候補 → 未計画 → 今日の予定を確定
+dayloop next     # 並びの先頭の未完了を1件出す
 dayloop check    # 昼: 未着手タスクをどうするか
 dayloop close    # 夕: 全件確定して日を閉じる（未確定が残ると閉じない）
 dayloop retro    # 週末: 完了率・持ち越し上位・メモ
