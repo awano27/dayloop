@@ -1,7 +1,10 @@
 pub mod fixture;
+pub mod minutes;
 pub mod model;
 pub mod outlook_com;
 pub mod rules;
+pub mod teams;
+pub mod tickets;
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, Local, NaiveDate};

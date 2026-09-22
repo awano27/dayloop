@@ -9,6 +9,7 @@ pub mod order;
 pub mod observe;
 pub mod intake;
 pub mod jev;
+pub mod jev_eval;
 pub mod markdown;
 pub mod mcp;
 pub mod model;

@@ -30,6 +30,9 @@ send_body = false
 
 [observe]
 fixture = ""
+
+[minutes]
+generator = "rules"
 "#;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -44,6 +47,26 @@ pub struct Config {
     pub jev: JevConfig,
     #[serde(default)]
     pub observe: ObserveConfig,
+    #[serde(default)]
+    pub minutes: MinutesConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MinutesConfig {
+    #[serde(default = "default_minutes_generator")]
+    pub generator: String,
+}
+
+impl Default for MinutesConfig {
+    fn default() -> Self {
+        Self {
+            generator: default_minutes_generator(),
+        }
+    }
+}
+
+fn default_minutes_generator() -> String {
+    "rules".into()
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

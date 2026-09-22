@@ -68,6 +68,30 @@ pub fn propose_unknown(
     Ok(out)
 }
 
+/// Write unknown answers only when a measured floor exists.
+/// `None` applies nothing. `not_done`, `carry`, and `drop` stay questions
+/// because the reply has no reason code.
+pub fn apply_if_measured(
+    store: &Store,
+    date: &str,
+    decider: &mut dyn Decider,
+    floor: Option<f64>,
+) -> Result<usize> {
+    let Some(floor) = floor else {
+        return Ok(0);
+    };
+    let rows = propose_unknown(store, date, decider, floor)?;
+    let mut n = 0;
+    for row in rows {
+        if row.confidence < floor || !matches!(row.choice.as_str(), "done" | "start") {
+            continue;
+        }
+        store.revise_task(&row.id, &row.choice, None)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// POST adapter. Field names follow this crate, not a copied slide example.
 /// 401 / 429 / 529 / transport failure become [`JevOutcome::Unavailable`].
 pub struct HttpDecider {

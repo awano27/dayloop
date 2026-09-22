@@ -1,0 +1,22 @@
+[
+  {"subject":"経費の件","human":"task"},
+  {"subject":"会議室の予約","human":"task"},
+  {"subject":"週次の数字","human":"info"},
+  {"subject":"本番反映の確認","human":"task"},
+  {"subject":"休暇の連絡","human":"info"},
+  {"subject":"見積の差し戻し","human":"task"},
+  {"subject":"採用面談の日程","human":"task"},
+  {"subject":"全社集会の案内","human":"info"},
+  {"subject":"障害の一次切り分け","human":"task"},
+  {"subject":"請求書の送付","human":"task"},
+  {"subject":"来期方針のメモ","human":"ask"},
+  {"subject":"キーボードの貸出","human":"info"},
+  {"subject":"顧客への返信","human":"task"},
+  {"subject":"リリースノートの確認","human":"task"},
+  {"subject":"席替えの案内","human":"info"},
+  {"subject":"契約更新の期限","human":"task"},
+  {"subject":"勉強会の出欠","human":"info"},
+  {"subject":"データ抽出の依頼","human":"task"},
+  {"subject":"明日の議題","human":"ask"},
+  {"subject":"備品発注","human":"task"}
+]

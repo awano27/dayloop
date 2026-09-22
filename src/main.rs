@@ -4,6 +4,9 @@ use clap::{Parser, Subcommand};
 use dayloop::config;
 use dayloop::doctor;
 use dayloop::graph;
+use dayloop::jev;
+use dayloop::jev::Decider;
+use dayloop::jev_eval;
 use dayloop::order;
 use dayloop::markdown;
 use dayloop::mcp;
@@ -176,6 +179,11 @@ enum Cmd {
     /// 外部ソースから Candidate / 予定を取り込む
     #[command(subcommand)]
     Intake(IntakeCmd),
+    /// 未知20件の一致を帯で出す。設定も台帳も変えない
+    JevEval {
+        #[arg(long)]
+        live: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -192,6 +200,18 @@ enum IntakeCmd {
     /// フィクスチャ JSON を同じパイプラインに流す
     Fixture {
         dir: std::path::PathBuf,
+    },
+    /// 決定 / TODO / アクション の行を会議候補にする
+    Note {
+        file: std::path::PathBuf,
+    },
+    /// チケットのフィクスチャを候補にする
+    Tickets {
+        file: std::path::PathBuf,
+    },
+    /// Teams のフィクスチャを候補にする
+    Teams {
+        file: std::path::PathBuf,
     },
 }
 
@@ -484,7 +504,29 @@ fn run() -> Result<i32> {
                 println!("{}", r.summary_line());
                 0
             }
+            IntakeCmd::Note { file } => {
+                let text = std::fs::read_to_string(&file)?;
+                let r = dayloop::intake::minutes::ingest(&store, &text)?;
+                println!(
+                    "議事録: 候補 {} 件、共有 {} 件、無視 {} 件",
+                    r.actions, r.info, r.ignored
+                );
+                0
+            }
+            IntakeCmd::Tickets { file } => {
+                let text = std::fs::read_to_string(&file)?;
+                let n = dayloop::intake::tickets::ingest(&store, &text)?;
+                println!("チケット候補: {n} 件");
+                0
+            }
+            IntakeCmd::Teams { file } => {
+                let text = std::fs::read_to_string(&file)?;
+                let n = dayloop::intake::teams::ingest(&store, &text)?;
+                println!("Teams 候補: {n} 件");
+                0
+            }
         },
+        Cmd::JevEval { live } => run_jev_eval(live)?,
         Cmd::Doctor
         | Cmd::Where
         | Cmd::Mcp
@@ -493,6 +535,42 @@ fn run() -> Result<i32> {
         | Cmd::Config(_) => unreachable!(),
     };
     Ok(code)
+}
+
+fn run_jev_eval(live: bool) -> Result<i32> {
+    let text = std::fs::read_to_string("fixtures/jev-band-20.json")?;
+    let mut rows = jev_eval::load_sheet(&text)?;
+    if live {
+        let cfg = config::load();
+        let key_ok = std::env::var("DAYLOOP_JEV_API_KEY")
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+        if !key_ok || cfg.jev.route.trim().is_empty() {
+            eprintln!("Jev の route か DAYLOOP_JEV_API_KEY がありません");
+            return Ok(2);
+        }
+        let mut decider = jev::HttpDecider {
+            route: cfg.jev.route.clone(),
+            timeout_ms: cfg.jev.timeout_ms,
+        };
+        let choices = vec!["task".to_string(), "info".to_string(), "ask".to_string()];
+        for row in &mut rows {
+            match decider.decide(&format!("subject={}", row.subject), &choices) {
+                jev::JevOutcome::Answer { choice, confidence }
+                    if choices.iter().any(|c| c == &choice) =>
+                {
+                    row.choice = choice;
+                    row.confidence = confidence;
+                }
+                _ => {
+                    row.choice.clear();
+                    row.confidence = 0.0;
+                }
+            }
+        }
+    }
+    print!("{}", jev_eval::report(&rows));
+    Ok(0)
 }
 
 fn export_for(store: &Store, t: &model::Task) -> Result<()> {

@@ -319,6 +319,15 @@ pub fn close_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     apply_observations(store, date)?;
     graph::apply_known_tasks(store, date)?;
     print_jev_hints(store, date);
+    let floor = crate::config::load().jev.commit_confidence;
+    if floor.is_some() {
+        let cfg = crate::config::load();
+        let mut decider = crate::jev::HttpDecider {
+            route: cfg.jev.route.clone(),
+            timeout_ms: cfg.jev.timeout_ms,
+        };
+        crate::jev::apply_if_measured(store, date, &mut decider, floor)?;
+    }
     let open = crate::order::day_tasks(store, date)?
         .into_iter()
         .filter(|t| t.state.is_open())

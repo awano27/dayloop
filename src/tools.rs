@@ -67,6 +67,8 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
         "plan_day" => {
             let d = date_arg(args)?;
             observe_first(store, &d)?;
+            crate::graph::apply_known_candidates(store, &d)?;
+            crate::graph::apply_known_tasks(store, &d)?;
             engine::plan_view(store, &d)
         }
         "confirm_plan" => {
@@ -186,11 +188,13 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
         "check_in" => {
             let d = date_arg(args)?;
             observe_first(store, &d)?;
+            crate::graph::apply_known_tasks(store, &d)?;
             engine::check_view(store, &d)
         }
         "close_day" => {
             let d = date_arg(args)?;
             observe_first(store, &d)?;
+            crate::graph::apply_known_tasks(store, &d)?;
             let open = store.open_tasks_for_day(&d)?;
             if !open.is_empty() {
                 return engine::close_view(store, &d);
