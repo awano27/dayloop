@@ -122,4 +122,4 @@ cargo build --release
 
 仕様は [../dayloop-spec.md](../dayloop-spec.md)。段階3 まで（CLI + MCP + 常駐 + Outlook COM 取り込み）がこのリポジトリの実装範囲。
 
-以降の順番と、判断モデル Jev をどこまで自動実行させるかは [docs/plans/2026-09-22-roadmap.md](docs/plans/2026-09-22-roadmap.md)。要約すると、台帳と質問を一系統にしたあと、Jev は記録（shadow）と提案（suggest）までに留め、新しい Outlook の Edge 取り込み、VS Code 拡張、会議・アラート・勤怠、M365 Copilot の順に入口を増やす。日を閉じる権限は台帳のまま。根拠は [docs/analysis/](docs/analysis/)。
+以降は [docs/plans/2026-09-22-roadmap.md](docs/plans/2026-09-22-roadmap.md)。判断は Jev に寄せ、本人は確信が足りない残りと、1日1回の確定だけを見る。開いたタスクが残る日を閉じる権限は台帳のまま。価値の説明は [docs/analysis/04-jev-product-value.md](docs/analysis/04-jev-product-value.md)。

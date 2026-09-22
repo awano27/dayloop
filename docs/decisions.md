@@ -22,4 +22,4 @@
 
 # 段階3.1以降
 
-未決の論点は [plans/2026-09-22-roadmap.md](plans/2026-09-22-roadmap.md) の「決定を後に残すもの」。選んだあとに、この表へ行を足す。
+未決の論点は [plans/2026-09-22-roadmap.md](plans/2026-09-22-roadmap.md) の「決定を後に残すもの」。製品方針は、判断を Jev に寄せて本人は残りと確定の1回だけを見ること（[analysis/04-jev-product-value.md](analysis/04-jev-product-value.md)）。選んだあとに、この表へ行を足す。
