@@ -129,6 +129,7 @@ pub fn ingest(
     if !dry_run {
         let today = now.format("%Y-%m-%d").to_string();
         crate::graph::apply_known_candidates(store, &today)?;
+        crate::jev::grow_if_configured(store, &today)?;
     }
 
     Ok(SyncResult {
