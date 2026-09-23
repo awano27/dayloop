@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::paths;
+use crate::screen;
 
 fn ok(label: &str, detail: &str) {
     println!("[OK] {label}  {detail}");
@@ -69,6 +70,13 @@ pub fn run() {
     match std::env::current_exe() {
         Ok(p) => ok("exe の実行", &p.display().to_string()),
         Err(_) => info("exe の実行", "パス不明"),
+    }
+    match screen::locate_wincli() {
+        Some(p) => ok("画面の読み取り", &p.display().to_string()),
+        None => info(
+            "画面の読み取り",
+            "wincli か Sbroenne.WindowsMcp.exe が無いと dayloop capture は取得失敗になります",
+        ),
     }
 
     let mut prefer_vscode = false;
