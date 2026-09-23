@@ -1,36 +1,53 @@
 # dayloop
 
+1日のタスクをループで回し、その判断をグラフで直し、未知の節だけ Jev に聞く。
+
 ```mermaid
 flowchart TD
-  plan["朝  plan<br/>今日やる分を決める"]
-  next["日中  next<br/>次の1件だけ出す"]
-  check["昼  check<br/>未着手を確認する"]
-  close{"夕  close<br/>全部、決着した?"}
-  shut["その日を閉じる"]
+  loop["1日のループ<br/>plan → next → check → close"]
+  graph{"判断グラフ<br/>同じ節に枝がある?"}
+  apply["枝を台帳へ適用<br/>質問しない"]
+  jev["Jev<br/>未知の判断だけ"]
+  human["人が答える<br/>revise で直す"]
+  grow["枝を書く<br/>間違いは差し替える"]
+  shut{"全部、決着した?"}
+  tomorrow["翌朝は直した枝から"]
 
-  plan --> next --> check --> close
-  close -->|未確定が残る| close
-  close -->|完了・未完了・持ち越し・取り下げ| shut
-  shut -->|前日が開いたままなら、翌朝はそこから| plan
+  loop --> graph
+  graph -->|ある| apply
+  graph -->|ない| jev
+  jev -->|確度が足りる| grow
+  jev -->|足りない・オフ| human
+  human --> grow
+  grow --> apply
+  apply --> shut
+  shut -->|未確定が残る| loop
+  shut -->|閉じた| tomorrow
+  tomorrow --> loop
 ```
 
-未確定が残る日は、台帳が閉じない。判断するのは LLM ではなく、このループ。
+朝に予定を決め、日中は次の1件を出し、昼に未着手を確認し、夕に1件ずつ決着させる。未確定が残る日は台帳が閉じない。前日が開いたままなら、翌朝のループはそこから始まる。
 
-A local Windows CLI. The ledger closes the day only when every task is decided.
+その場の回答では終わらせない。件名、状況、送信者を節にし、選んだ手と理由を枝にする。次に同じ節が来たら、件名から状況、送信者の順に辿り、当たった枝をそのまま台帳へ入れる。質問は出さない。直しは `revise` で行う。古い枝は残し、今の答えだけを active にする。直したその回から、次のループは新しい枝を使う。
+
+枝が無い節だけを Jev に渡す。グラフ全体は渡さない。確度が足りる答えは枝になり、翌日からその節は質問しない。足りない答え、要確認、Jev がオフのときは人が選び、その回答が枝になる。開いたタスクが残る日を閉じる権限は、グラフにも Jev にも渡さない。Jev は既定でオフなので、ループとグラフだけでも回る。
+
+A daily task loop. Decisions are stored and corrected as a graph. Jev judges only the nodes that have no edge. The ledger still closes the day.
 
 https://github.com/awano27/dayloop
 
-| いつ | コマンド | 画面で起きること |
+| ループ | コマンド | グラフと Jev |
 |---|---|---|
-| 朝 | `dayloop plan` | 前日の残り、候補、今日の予定を確定する |
+| 朝 | `dayloop plan` | 既知の枝で候補と予定を進め、未知だけ聞く |
 | 日中 | `dayloop next` | 並びの先頭を1件出す |
-| 昼 | `dayloop check` | 未着手を、やるか持ち越すか聞く |
-| 夕 | `dayloop close` | 1件ずつ完了・未完了・持ち越し・取り下げ。残ると閉じない |
+| 昼 | `dayloop check` | 未着手を、枝があれば質問せず進める |
+| 夕 | `dayloop close` | 残件を決着させる。枝が無ければ Jev、足りなければ人 |
+| 直し | `dayloop revise` | 選んだ手を新しい枝にする |
 | 金曜夕 | `dayloop retro` | 週の完了率と、持ち越しが多いタスク |
 
-3回持ち越したタスクは、分割・取り下げ・期限変更まで止まる。
+3回持ち越したタスクは、分割・取り下げ・期限変更まで止まる。その答えも枝になる。
 
-コマンドの残り、終了コード、設定は [docs/guide.md](docs/guide.md)。
+辿り方は [docs/analysis/05-decision-graph.md](docs/analysis/05-decision-graph.md)。Jev の確度は [docs/jev-eval.md](docs/jev-eval.md)。コマンドの残りと設定は [docs/guide.md](docs/guide.md)。
 
 ## 試す
 
@@ -45,7 +62,7 @@ cargo build --release
 | | |
 |---|---|
 | OS | Windows 10 / 11。管理者権限は不要 |
-| Outlook | クラシック版があるときだけメールと予定を読む。無くても上のループは動く |
+| Outlook | クラシック版があるときだけメールと予定を読む。無くてもループは動く |
 | 外に出るもの | ない。パスワードもトークンも持たない |
 | Outlook への書き込み | しない。本文とメールアドレスは既定で読まない |
 
@@ -53,6 +70,6 @@ cargo build --release
 
 ## この先
 
-今あるのは CLI、MCP、常駐、Outlook の読み取りまで。人が答えたことは次から質問しない。同じ状況の枝が無いときだけ Jev が初回の判断をする。開いたタスクが残る日を閉じる権限は台帳のまま。
+今あるのは、1日のループ、判断グラフ、未知の節への Jev、MCP、常駐、Outlook の読み取りまで。
 
-予定は [docs/plans/2026-09-22-roadmap.md](docs/plans/2026-09-22-roadmap.md)。判断の残し方は [docs/analysis/05-decision-graph.md](docs/analysis/05-decision-graph.md)。
+予定は [docs/plans/2026-09-22-roadmap.md](docs/plans/2026-09-22-roadmap.md)。
