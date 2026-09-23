@@ -307,7 +307,7 @@ fn run() -> Result<i32> {
         }
         Cmd::Next { date } => {
             let date = resolve_date(date.as_deref())?;
-            match order::next_open(&store, &date)? {
+            match order::prepare_next(&store, &date)? {
                 Some(t) => {
                     println!("{}  {}", t.id, t.title);
                     0
