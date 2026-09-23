@@ -128,6 +128,18 @@ pub fn next_open(store: &Store, date: &str) -> Result<Option<Task>> {
     Ok(day_tasks(store, date)?.into_iter().find(|t| t.state.is_open()))
 }
 
+/// Apply observed completion and known graph edges, then return the first task
+/// that still needs a person. Already-decided work moves on before this returns.
+pub fn prepare_next(store: &Store, date: &str) -> Result<Option<Task>> {
+    let cfg = crate::config::load();
+    let map = crate::observe::load_map(&cfg.observe)?;
+    let now = chrono::Local::now().format("%H:%M").to_string();
+    crate::observe::apply_day(store, date, &map, &now)?;
+    crate::graph::apply_known_tasks(store, date)?;
+    crate::jev::grow_if_configured(store, date)?;
+    next_open(store, date)
+}
+
 pub fn tie_hint(decider: &mut dyn crate::jev::Decider, a: &str, b: &str) -> Option<String> {
     let choices = vec![a.to_string(), b.to_string()];
     let state = format!("order a={a} b={b}");

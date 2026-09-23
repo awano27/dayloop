@@ -54,3 +54,31 @@ fn next_open_is_the_first_ranked_task() {
     let next = order::next_open(&store, date).unwrap().unwrap();
     assert_eq!(next.id, late.id);
 }
+
+#[test]
+fn next_skips_a_task_the_graph_already_knows_how_to_carry() {
+    let home = Home::new();
+    let store = home.store();
+    let date = "2026-09-22";
+    let first = store
+        .add_task("経費精算", Some(date), Some(30), "manual", None, Some(date))
+        .unwrap();
+    store
+        .carry_over(&first.id, "時間不足", "2026-09-23", None)
+        .unwrap();
+    store
+        .add_task("経費精算", Some(date), Some(30), "manual", None, Some(date))
+        .unwrap();
+    let other = store
+        .add_task("別件", None, Some(60), "manual", None, Some(date))
+        .unwrap();
+
+    let next = order::prepare_next(&store, date).unwrap().unwrap();
+    assert_eq!(next.id, other.id);
+    assert!(store
+        .tasks_for_day(date)
+        .unwrap()
+        .iter()
+        .filter(|t| t.title == "経費精算")
+        .all(|t| !t.state.is_open()));
+}
