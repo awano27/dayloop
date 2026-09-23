@@ -1,7 +1,10 @@
 pub mod fixture;
+pub mod minutes;
 pub mod model;
 pub mod outlook_com;
 pub mod rules;
+pub mod teams;
+pub mod tickets;
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, Local, NaiveDate};
@@ -121,6 +124,12 @@ pub fn ingest(
         }
         store.upsert_events(&ds, evs)?;
         markdown::export(store, &ds)?;
+    }
+
+    if !dry_run {
+        let today = now.format("%Y-%m-%d").to_string();
+        crate::graph::apply_known_candidates(store, &today)?;
+        crate::jev::grow_if_configured(store, &today)?;
     }
 
     Ok(SyncResult {

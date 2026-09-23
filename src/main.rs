@@ -3,6 +3,11 @@ use clap::{Parser, Subcommand};
 
 use dayloop::config;
 use dayloop::doctor;
+use dayloop::graph;
+use dayloop::jev;
+use dayloop::jev::Decider;
+use dayloop::jev_eval;
+use dayloop::order;
 use dayloop::markdown;
 use dayloop::mcp;
 use dayloop::model;
@@ -35,6 +40,16 @@ enum Cmd {
     Today {
         #[arg(long)]
         date: Option<String>,
+    },
+    /// 次に手を付ける未完了タスクを1件出す
+    Next {
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// 同順位の2件について、先にやるタイトルを覚える
+    Prefer {
+        first: String,
+        second: String,
     },
     /// タスクを追加（既定は今日の予定）
     Add {
@@ -100,6 +115,14 @@ enum Cmd {
         #[arg(long)]
         reason: String,
     },
+    /// 学習した枝を書き換え、開いている対象へすぐ適用する
+    Revise {
+        id: String,
+        /// done | not_done | carry | drop | start | shelve | today | backlog | reject
+        choice: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// 分割（元は取り下げ、分割先は次の営業日の予定）
     Split {
         id: String,
@@ -156,6 +179,11 @@ enum Cmd {
     /// 外部ソースから Candidate / 予定を取り込む
     #[command(subcommand)]
     Intake(IntakeCmd),
+    /// 未知20件の一致を帯で出す。設定も台帳も変えない
+    JevEval {
+        #[arg(long)]
+        live: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -172,6 +200,18 @@ enum IntakeCmd {
     /// フィクスチャ JSON を同じパイプラインに流す
     Fixture {
         dir: std::path::PathBuf,
+    },
+    /// 決定 / TODO / アクション の行を会議候補にする
+    Note {
+        file: std::path::PathBuf,
+    },
+    /// チケットのフィクスチャを候補にする
+    Tickets {
+        file: std::path::PathBuf,
+    },
+    /// Teams のフィクスチャを候補にする
+    Teams {
+        file: std::path::PathBuf,
     },
 }
 
@@ -265,6 +305,24 @@ fn run() -> Result<i32> {
             rituals::print_day(&store, &d)?;
             0
         }
+        Cmd::Next { date } => {
+            let date = resolve_date(date.as_deref())?;
+            match order::next_open(&store, &date)? {
+                Some(t) => {
+                    println!("{}  {}", t.id, t.title);
+                    0
+                }
+                None => {
+                    println!("{date} に未完了はありません");
+                    0
+                }
+            }
+        }
+        Cmd::Prefer { first, second } => {
+            graph::record_order(&store, &first, &second)?;
+            println!("覚えました: 「{first}」を「{second}」より先");
+            0
+        }
         Cmd::Add { title, due, estimate, date, backlog } => {
             if let Some(d) = &due {
                 parse_date(d)?;
@@ -337,6 +395,27 @@ fn run() -> Result<i32> {
             export_for(&store, &t)?;
             0
         }
+        Cmd::Revise { id, choice, reason } => match choice.as_str() {
+            "shelve" | "today" | "backlog" | "reject" => {
+                let c = store.revise_candidate(&id, &choice)?;
+                println!("枝を更新: {}  {}  -> {choice}", short(&c.id), c.title);
+                0
+            }
+            "done" | "not_done" | "carry" | "drop" | "start" => {
+                let t = store.revise_task(&id, &choice, reason.as_deref())?;
+                println!(
+                    "枝を更新: {}  {}  [{}]",
+                    short(&t.id),
+                    t.title,
+                    t.state.label_ja()
+                );
+                export_for(&store, &t)?;
+                0
+            }
+            other => {
+                anyhow::bail!("選択肢が不正です: {other}");
+            }
+        },
         Cmd::Split { id, reason, into, to } => {
             let old = store.get_task(&id)?;
             let base = old.plan_date.clone().unwrap_or_else(util::today);
@@ -425,7 +504,29 @@ fn run() -> Result<i32> {
                 println!("{}", r.summary_line());
                 0
             }
+            IntakeCmd::Note { file } => {
+                let text = std::fs::read_to_string(&file)?;
+                let r = dayloop::intake::minutes::ingest(&store, &text)?;
+                println!(
+                    "議事録: 候補 {} 件、共有 {} 件、無視 {} 件",
+                    r.actions, r.info, r.ignored
+                );
+                0
+            }
+            IntakeCmd::Tickets { file } => {
+                let text = std::fs::read_to_string(&file)?;
+                let n = dayloop::intake::tickets::ingest(&store, &text)?;
+                println!("チケット候補: {n} 件");
+                0
+            }
+            IntakeCmd::Teams { file } => {
+                let text = std::fs::read_to_string(&file)?;
+                let n = dayloop::intake::teams::ingest(&store, &text)?;
+                println!("Teams 候補: {n} 件");
+                0
+            }
         },
+        Cmd::JevEval { live } => run_jev_eval(live)?,
         Cmd::Doctor
         | Cmd::Where
         | Cmd::Mcp
@@ -434,6 +535,42 @@ fn run() -> Result<i32> {
         | Cmd::Config(_) => unreachable!(),
     };
     Ok(code)
+}
+
+fn run_jev_eval(live: bool) -> Result<i32> {
+    let text = std::fs::read_to_string("fixtures/jev-band-20.json")?;
+    let mut rows = jev_eval::load_sheet(&text)?;
+    if live {
+        let cfg = config::load();
+        let key_ok = std::env::var("DAYLOOP_JEV_API_KEY")
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+        if !key_ok || cfg.jev.route.trim().is_empty() {
+            eprintln!("Jev の route か DAYLOOP_JEV_API_KEY がありません");
+            return Ok(2);
+        }
+        let mut decider = jev::HttpDecider {
+            route: cfg.jev.route.clone(),
+            timeout_ms: cfg.jev.timeout_ms,
+        };
+        let choices = vec!["task".to_string(), "info".to_string(), "ask".to_string()];
+        for row in &mut rows {
+            match decider.decide(&format!("subject={}", row.subject), &choices) {
+                jev::JevOutcome::Answer { choice, confidence }
+                    if choices.iter().any(|c| c == &choice) =>
+                {
+                    row.choice = choice;
+                    row.confidence = confidence;
+                }
+                _ => {
+                    row.choice.clear();
+                    row.confidence = 0.0;
+                }
+            }
+        }
+    }
+    print!("{}", jev_eval::report(&rows));
+    Ok(0)
 }
 
 fn export_for(store: &Store, t: &model::Task) -> Result<()> {

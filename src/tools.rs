@@ -12,7 +12,7 @@ use crate::util::{next_workday, parse_date, resolve_date};
 pub fn list() -> Vec<Value> {
     vec![
         tool("get_today", "今日（または指定日）のタスクと Day の状態、未処理候補数、未クローズの過去日を返す。会話の最初に呼ぶ。", obj(&[("date", str_date())], &[])),
-        tool("plan_day", "朝に呼ぶ。未クローズ日・候補・未計画・今日の予定と questions を返す。本人に1問ずつ聞き、resolve_with のツールで反映してから confirm_plan する。", obj(&[("date", str_date())], &[])),
+        tool("plan_day", "朝に呼ぶ。未クローズ日・候補・未計画・今日の予定と questions を返す。本人に1問ずつ聞き、options の tool と needs で反映してから confirm_plan する。", obj(&[("date", str_date())], &[])),
         tool("confirm_plan", "plan_day の questions を処理したあと、その日の予定を確定し plan_confirmed_at を記録する。", obj(&[("date", str_date())], &[])),
         tool("add_task", "タスクを追加する。backlog=true なら未計画、そうでなければ date（省略時は今日）の予定になる。", obj(&[("title", schema("string", "タスク名")), ("due", schema("string", "期限 YYYY-MM-DD")), ("estimate_min", schema("integer", "見積（分）")), ("date", str_date()), ("backlog", schema("boolean", "未計画に入れる"))], &["title"])),
         tool("schedule_task", "未計画のタスクを指定日の予定に入れる。plan_day の backlog 質問への回答。", obj(&[("id", str_id()), ("date", schema("string", "予定日 YYYY-MM-DD"))], &["id", "date"])),
@@ -22,8 +22,8 @@ pub fn list() -> Vec<Value> {
         tool("carry_over", "タスクを持ち越す。3回目以降は error=carry_blocked と question を返す（例外にしない）。期限変更は reschedule_due を付ける。", obj(&[("id", str_id()), ("reason", schema("string", "持ち越し理由")), ("to", schema("string", "持ち越し先 YYYY-MM-DD")), ("reschedule_due", schema("string", "新しい期限。付けると持ち越し回数をリセット"))], &["id", "reason"])),
         tool("drop_task", "タスクを取り下げる。reason は空にできない。", obj(&[("id", str_id()), ("reason", schema("string", "取り下げ理由"))], &["id", "reason"])),
         tool("split_task", "タスクを2つ以上に分割する。元は取り下げ、titles が to（省略時は次の営業日）の予定になる。持ち越し上限の解消に使う。", obj(&[("id", str_id()), ("titles", json!({"type":"array","items":{"type":"string"},"description":"分割後のタイトル（2つ以上）"})), ("reason", schema("string", "分割理由")), ("to", schema("string", "分割先 YYYY-MM-DD"))], &["id", "titles", "reason"])),
-        tool("check_in", "昼に呼ぶ。進行中・未着手と questions を返す。本人に1問ずつ聞き、resolve_with のツールで反映する。", obj(&[("date", str_date())], &[])),
-        tool("close_day", "夕方に呼ぶ。open が残った場合は closed=false と questions を返す。既定値では閉じない。questions を本人に1問ずつ聞き、resolve_with のツールで確定してから再度呼ぶ。", obj(&[("date", str_date())], &[])),
+        tool("check_in", "昼に呼ぶ。進行中・未着手と questions を返す。本人に1問ずつ聞き、options の tool と needs で反映する。", obj(&[("date", str_date())], &[])),
+        tool("close_day", "夕方に呼ぶ。open が残った場合は closed=false と questions を返す。既定値では閉じない。questions を本人に1問ずつ聞き、options の tool と needs で確定してから再度呼ぶ。", obj(&[("date", str_date())], &[])),
         tool("retro_week", "週末に呼ぶ。週の集計・日別・持ち越し上位と、carried_count>=3 の open タスクの questions を返す。", obj(&[("date", str_date())], &[])),
         tool("list_candidates", "採用/却下待ちの候補を返す。age_days と stale（7日以上）付き。", obj(&[], &[])),
         tool("add_candidate", "候補箱に追加する。同じ source_ref が既にあるか却下済みなら skipped を返す。", obj(&[("title", schema("string", "候補のタイトル")), ("source", schema("string", "teams / outlook / meeting / alert / manual")), ("source_ref", schema("string", "元メッセージ等への参照"))], &["title", "source"])),
@@ -32,6 +32,17 @@ pub fn list() -> Vec<Value> {
         tool("export_markdown", "指定日の Markdown を書き出し、パスを返す。", obj(&[("date", str_date())], &[])),
         tool("import_markdown", "指定日の Markdown の手編集を取り込む。[x] は完了、新しい - [ ] は追加。", obj(&[("date", str_date())], &[])),
         tool("sync_sources", "有効な取り込みアダプタを実行する。Outlook が無い環境でも部分失敗を返し、isError にはしない。", obj(&[], &[])),
+        tool(
+            "prefer_order",
+            "同順位の2件について、先にやるタイトルを覚える。",
+            obj(
+                &[
+                    ("first", schema("string", "先にやるタイトル")),
+                    ("second", schema("string", "あとでやるタイトル")),
+                ],
+                &["first", "second"],
+            ),
+        ),
     ]
 }
 
@@ -53,7 +64,14 @@ pub fn dispatch(store: &Store, name: &str, args: &Value) -> Value {
 fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
     match name {
         "get_today" => engine::today_view(store, &date_arg(args)?),
-        "plan_day" => engine::plan_view(store, &date_arg(args)?),
+        "plan_day" => {
+            let d = date_arg(args)?;
+            observe_first(store, &d)?;
+            crate::graph::apply_known_candidates(store, &d)?;
+            crate::graph::apply_known_tasks(store, &d)?;
+            crate::jev::grow_if_configured(store, &d)?;
+            engine::plan_view(store, &d)
+        }
         "confirm_plan" => {
             let d = date_arg(args)?;
             store.confirm_plan(&d)?;
@@ -168,9 +186,18 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
             markdown::export(store, &to)?;
             Ok(serde_json::to_value(news)?)
         }
-        "check_in" => engine::check_view(store, &date_arg(args)?),
+        "check_in" => {
+            let d = date_arg(args)?;
+            observe_first(store, &d)?;
+            crate::graph::apply_known_tasks(store, &d)?;
+            crate::jev::grow_if_configured(store, &d)?;
+            engine::check_view(store, &d)
+        }
         "close_day" => {
             let d = date_arg(args)?;
+            observe_first(store, &d)?;
+            crate::graph::apply_known_tasks(store, &d)?;
+            crate::jev::grow_if_configured(store, &d)?;
             let open = store.open_tasks_for_day(&d)?;
             if !open.is_empty() {
                 return engine::close_view(store, &d);
@@ -228,8 +255,22 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
             let cfg = crate::config::load();
             Ok(crate::intake::sync_all_json(store, &cfg))
         }
+        "prefer_order" => {
+            let first = req_str(args, "first")?;
+            let second = req_str(args, "second")?;
+            crate::graph::record_order(store, &first, &second)?;
+            Ok(json!({ "first": first, "second": second }))
+        }
         _ => anyhow::bail!("unknown tool: {name}"),
     }
+}
+
+fn observe_first(store: &Store, date: &str) -> Result<()> {
+    let cfg = crate::config::load();
+    let map = crate::observe::load_map(&cfg.observe)?;
+    let now = chrono::Local::now().format("%H:%M").to_string();
+    crate::observe::apply_day(store, date, &map, &now)?;
+    Ok(())
 }
 
 fn export_task(store: &Store, t: &crate::model::Task) -> Result<()> {

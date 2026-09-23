@@ -6,6 +6,8 @@ use std::io::{self, BufRead, IsTerminal, Write};
 
 use anyhow::Result;
 
+use crate::engine::Question;
+use crate::graph;
 use crate::model::{State, Task};
 use crate::store::{CarryBlocked, Store, CANDIDATE_STALE_DAYS, MAX_CARRY};
 use crate::util::{days_since, hhmm, next_workday, parse_date, short, week_range};
@@ -120,7 +122,7 @@ fn meta(t: &Task) -> String {
 
 pub fn print_day(store: &Store, date: &str) -> Result<()> {
     let day = store.get_day(date)?;
-    let tasks = store.tasks_for_day(date)?;
+    let tasks = crate::order::day_tasks(store, date)?;
     let open = tasks.iter().filter(|t| t.state.is_open()).count();
     println!("== {date}");
     match &day {
@@ -216,7 +218,9 @@ fn carry_flow(store: &Store, ui: &Ui, t: &Task, date: &str) -> Result<bool> {
 
 /// Invariant 3: split / drop / reschedule.
 fn resolve_blocked(store: &Store, ui: &Ui, t: &Task, to: &str) -> Result<bool> {
-    match ui.choose("どうしますか", &["分割する", "取り下げる", "期限を変えて持ち越す", "後で決める"]) {
+    let q = Question::carry_blocked(t);
+    let labels = option_labels(&q);
+    match ui.choose(&q.question, &labels) {
         Some(0) => {
             let mut titles = Vec::new();
             loop {
@@ -259,14 +263,76 @@ fn resolve_blocked(store: &Store, ui: &Ui, t: &Task, to: &str) -> Result<bool> {
     }
 }
 
+/// Jev may label an unknown node. The line is a hint; only `revise` writes an edge.
+fn print_jev_hints(store: &Store, date: &str) {
+    let cfg = crate::config::load();
+    if !cfg.jev.mode.eq_ignore_ascii_case("on") {
+        return;
+    }
+    let key_ok = std::env::var("DAYLOOP_JEV_API_KEY")
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    if !key_ok || cfg.jev.route.trim().is_empty() {
+        return;
+    }
+    let mut decider = crate::jev::HttpDecider {
+        route: cfg.jev.route.clone(),
+        timeout_ms: cfg.jev.timeout_ms,
+    };
+    let min = cfg.jev.commit_confidence.unwrap_or(0.0);
+    let Ok(rows) = crate::jev::propose_unknown(store, date, &mut decider, min) else {
+        return;
+    };
+    for row in rows {
+        println!(
+            "  新しい節: {} -> {} ({})",
+            row.title, row.choice, row.confidence
+        );
+    }
+    let tasks = match crate::order::day_tasks(store, date) {
+        Ok(tasks) => tasks,
+        Err(_) => return,
+    };
+    let spans = crate::order::spans_from_events(&store.events_for_day(date).unwrap_or_default());
+    if let Some((a, b)) = crate::order::first_open_tie(date, &tasks, &spans) {
+        if crate::graph::saved_first(store, &a.title, &b.title).ok().flatten().is_some() {
+            return;
+        }
+        if let Some(choice) = crate::order::tie_hint(&mut decider, &a.title, &b.title) {
+            let other = if choice == a.title { &b.title } else { &a.title };
+            println!("  順番のヒント: 「{choice}」を先に。覚えるには prefer {choice} {other}");
+        }
+    }
+}
+
+fn option_labels(q: &Question) -> Vec<&str> {
+    q.options.iter().map(|o| o.label.as_str()).collect()
+}
+
+fn apply_observations(store: &Store, date: &str) -> Result<()> {
+    let cfg = crate::config::load();
+    let map = crate::observe::load_map(&cfg.observe)?;
+    let now = chrono::Local::now().format("%H:%M").to_string();
+    crate::observe::apply_day(store, date, &map, &now)?;
+    Ok(())
+}
+
 /// Evening: every open task becomes done / not_done / carried / dropped, then the day closes.
 pub fn close_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
-    let open = store.open_tasks_for_day(date)?;
+    apply_observations(store, date)?;
+    graph::apply_known_tasks(store, date)?;
+    crate::jev::grow_if_configured(store, date)?;
+    print_jev_hints(store, date);
+    let open = crate::order::day_tasks(store, date)?
+        .into_iter()
+        .filter(|t| t.state.is_open())
+        .collect::<Vec<_>>();
     println!("== {date} のクローズ: 未確定 {} 件", open.len());
     let mut pending = 0usize;
     for t in open {
-        let q = format!("{}  {}{}", short(&t.id), t.title, meta(&t));
-        match ui.choose(&q, &["完了", "未完了（理由を書く）", "持ち越し（理由を書く）", "取り下げ（理由を書く）"]) {
+        let q = Question::close_task(&t);
+        let labels = option_labels(&q);
+        match ui.choose(&q.question, &labels) {
             None => pending += 1,
             Some(0) => {
                 store.transition(&t.id, State::Done, None, None)?;
@@ -323,6 +389,11 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
         println!();
     }
 
+    apply_observations(store, date)?;
+    graph::apply_known_candidates(store, date)?;
+    graph::apply_known_tasks(store, date)?;
+    crate::jev::grow_if_configured(store, date)?;
+
     let mut pending = 0usize;
 
     let mut cands = store.open_candidates()?;
@@ -331,10 +402,9 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
         println!("== 候補 {} 件", cands.len());
     }
     for c in cands {
-        let age = days_since(&c.created_at);
-        let stale = if age >= CANDIDATE_STALE_DAYS { format!("  !! {age} 日放置") } else { String::new() };
-        let q = format!("{}  {}  ({}){stale}", short(&c.id), c.title, c.source);
-        match ui.choose(&q, &["今日の予定に入れる", "未計画に入れる", "却下", "後で決める"]) {
+        let q = Question::candidate(&c, date);
+        let labels = option_labels(&q);
+        match ui.choose(&q.question, &labels) {
             None => pending += 1,
             Some(0) => {
                 store.accept_candidate(&c.id, Some(date))?;
@@ -358,8 +428,9 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
         println!("== 未計画 {} 件", backlog.len());
     }
     for t in backlog {
-        let q = format!("{}  {}{}", short(&t.id), t.title, meta(&t));
-        if let Some(0) = ui.choose(&q, &["今日やる", "そのまま"]) {
+        let q = Question::backlog(&t, date);
+        let labels = option_labels(&q);
+        if let Some(0) = ui.choose(&q.question, &labels) {
             store.schedule(&t.id, date)?;
             println!("  -> 今日の予定");
         }
@@ -373,7 +444,9 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
         return Ok(Outcome::Pending(pending));
     }
     let n = store.open_tasks_for_day(date)?.len();
-    match ui.choose(&format!("{date} の予定 {n} 件をこの内容で確定しますか"), &["確定する", "まだ"]) {
+    let q = Question::confirm_plan(date, n);
+    let labels = option_labels(&q);
+    match ui.choose(&q.question, &labels) {
         Some(0) => {
             store.confirm_plan(date)?;
             println!("確定しました。");
@@ -385,7 +458,13 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
 
 /// Midday: untouched tasks get a decision.
 pub fn check_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
-    let open = store.open_tasks_for_day(date)?;
+    apply_observations(store, date)?;
+    graph::apply_known_tasks(store, date)?;
+    crate::jev::grow_if_configured(store, date)?;
+    let open = crate::order::day_tasks(store, date)?
+        .into_iter()
+        .filter(|t| t.state.is_open())
+        .collect::<Vec<_>>();
     let doing: Vec<&Task> = open.iter().filter(|t| t.state == State::InProgress).collect();
     let untouched: Vec<&Task> = open.iter().filter(|t| t.state == State::Planned).collect();
     println!("== {date} の途中確認: 未着手 {} 件 / 進行中 {} 件", untouched.len(), doing.len());
@@ -394,8 +473,9 @@ pub fn check_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     }
     let mut pending = 0usize;
     for t in untouched {
-        let q = format!("未着手  {}  {}{}", short(&t.id), t.title, meta(t));
-        match ui.choose(&q, &["今日中にやる", "今から着手", "持ち越す", "取り下げる"]) {
+        let q = Question::check_task(t);
+        let labels = option_labels(&q);
+        match ui.choose(&q.question, &labels) {
             None => pending += 1,
             Some(0) => {}
             Some(1) => {

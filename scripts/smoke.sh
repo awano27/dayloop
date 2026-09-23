@@ -5,7 +5,14 @@
 set -u
 export DAYLOOP_HOME="$(dirname "$0")/dl-home"
 rm -rf "$DAYLOOP_HOME"
-BIN="${DAYLOOP_BIN:-$(dirname "$0")/../target/release/dayloop.exe}"
+ROOT="$(dirname "$0")/.."
+if [ -n "${DAYLOOP_BIN:-}" ]; then
+  BIN="$DAYLOOP_BIN"
+elif [ -x "$ROOT/target/release/dayloop" ]; then
+  BIN="$ROOT/target/release/dayloop"
+else
+  BIN="$ROOT/target/release/dayloop.exe"
+fi
 D1=2026-09-01   # Tue (a past day, so plan on D2 must force-close it)
 D2=2026-09-02
 D3=2026-09-03

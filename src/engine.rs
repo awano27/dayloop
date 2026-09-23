@@ -180,9 +180,31 @@ pub fn candidate_json(c: &Candidate) -> Value {
     })
 }
 
+fn open_in_order(store: &Store, date: &str) -> Result<Vec<Task>> {
+    Ok(crate::order::day_tasks(store, date)?
+        .into_iter()
+        .filter(|t| t.state.is_open())
+        .collect())
+}
+
+fn order_tie_json(store: &Store, date: &str) -> Result<Value> {
+    let tasks = crate::order::day_tasks(store, date)?;
+    let spans = crate::order::spans_from_events(&store.events_for_day(date)?);
+    let Some((a, b)) = crate::order::first_open_tie(date, &tasks, &spans) else {
+        return Ok(Value::Null);
+    };
+    Ok(json!({
+        "first_id": a.id,
+        "first_title": a.title,
+        "second_id": b.id,
+        "second_title": b.title,
+        "tool": "prefer_order",
+    }))
+}
+
 pub fn today_view(store: &Store, date: &str) -> Result<Value> {
     let day = store.get_day(date)?;
-    let tasks = store.tasks_for_day(date)?;
+    let tasks = crate::order::day_tasks(store, date)?;
     let cands = store.open_candidates()?;
     let unclosed = store.unclosed_days_before(date)?;
     let events = store.events_for_day(date)?;
@@ -200,8 +222,12 @@ pub fn plan_view(store: &Store, date: &str) -> Result<Value> {
     let unclosed = store.unclosed_days_before(date)?;
     let mut unclosed_out = Vec::new();
     let mut questions = Vec::new();
+    let mut earlier_open = false;
     for d in &unclosed {
-        let open = store.open_tasks_for_day(d)?;
+        let open = open_in_order(store, d)?;
+        if !open.is_empty() {
+            earlier_open = true;
+        }
         unclosed_out.push(json!({ "date": d, "open": open }));
         for t in &open {
             questions.push(Question::close_task(t));
@@ -219,9 +245,11 @@ pub fn plan_view(store: &Store, date: &str) -> Result<Value> {
         questions.push(Question::backlog(t, date));
     }
 
-    let planned = store.tasks_for_day(date)?;
+    let planned = crate::order::day_tasks(store, date)?;
     let n_open = store.open_tasks_for_day(date)?.len();
-    questions.push(Question::confirm_plan(date, n_open));
+    if !earlier_open {
+        questions.push(Question::confirm_plan(date, n_open));
+    }
 
     let events = store.events_for_day(date)?;
     Ok(json!({
@@ -232,11 +260,12 @@ pub fn plan_view(store: &Store, date: &str) -> Result<Value> {
         "planned": planned,
         "events": events,
         "questions": questions,
+        "order_tie": order_tie_json(store, date)?,
     }))
 }
 
 pub fn check_view(store: &Store, date: &str) -> Result<Value> {
-    let open = store.open_tasks_for_day(date)?;
+    let open = open_in_order(store, date)?;
     let doing: Vec<&Task> = open.iter().filter(|t| t.state == State::InProgress).collect();
     let untouched: Vec<&Task> = open.iter().filter(|t| t.state == State::Planned).collect();
     let questions: Vec<Question> = untouched.iter().map(|t| Question::check_task(t)).collect();
@@ -245,16 +274,18 @@ pub fn check_view(store: &Store, date: &str) -> Result<Value> {
         "in_progress": doing,
         "untouched": untouched,
         "questions": questions,
+        "order_tie": order_tie_json(store, date)?,
     }))
 }
 
 pub fn close_view(store: &Store, date: &str) -> Result<Value> {
-    let open = store.open_tasks_for_day(date)?;
+    let open = open_in_order(store, date)?;
     let questions: Vec<Question> = open.iter().map(Question::close_task).collect();
     Ok(json!({
         "closed": false,
         "open": open,
         "questions": questions,
+        "order_tie": order_tie_json(store, date)?,
     }))
 }
 

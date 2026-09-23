@@ -299,6 +299,9 @@ mod tests {
             },
             notify: Notify { method: "file".into() },
             intake: crate::config::IntakeConfig::default(),
+            jev: crate::config::JevConfig::default(),
+            observe: crate::config::ObserveConfig::default(),
+            minutes: crate::config::MinutesConfig::default(),
         }
     }
 

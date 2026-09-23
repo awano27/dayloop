@@ -83,6 +83,12 @@ pub struct Task {
     pub evidence: Option<String>,
     pub created_at: String,
     pub closed_at: Option<String>,
+    pub carried_from: Option<String>,
+    pub proposed_state: Option<String>,
+    pub proposed_reason_code: Option<String>,
+    pub proposal_confidence: Option<f64>,
+    pub state_note: Option<String>,
+    pub decided_by: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
