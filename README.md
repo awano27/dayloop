@@ -1,26 +1,36 @@
 # dayloop
 
-1日のタスクを、朝に計画し、昼に確認し、夕に確定する。できたのか、忘れているのかは LLM ではなく台帳が決める。未確定が残る日は閉じない。
+```mermaid
+flowchart TD
+  plan["朝  plan<br/>今日やる分を決める"]
+  next["日中  next<br/>次の1件だけ出す"]
+  check["昼  check<br/>未着手を確認する"]
+  close{"夕  close<br/>全部、決着した?"}
+  shut["その日を閉じる"]
 
-A local Windows CLI for that loop. The ledger decides whether the day is done. An LLM is optional.
+  plan --> next --> check --> close
+  close -->|未確定が残る| close
+  close -->|完了・未完了・持ち越し・取り下げ| shut
+  shut -->|前日が開いたままなら、翌朝はそこから| plan
+```
+
+未確定が残る日は、台帳が閉じない。判断するのは LLM ではなく、このループ。
+
+A local Windows CLI. The ledger closes the day only when every task is decided.
 
 https://github.com/awano27/dayloop
 
-管理者権限は要らない。書き込みは `%LOCALAPPDATA%\dayloop` だけ。Copilot や LM Studio を繋いでも、無くても回る。
+| いつ | コマンド | 画面で起きること |
+|---|---|---|
+| 朝 | `dayloop plan` | 前日の残り、候補、今日の予定を確定する |
+| 日中 | `dayloop next` | 並びの先頭を1件出す |
+| 昼 | `dayloop check` | 未着手を、やるか持ち越すか聞く |
+| 夕 | `dayloop close` | 1件ずつ完了・未完了・持ち越し・取り下げ。残ると閉じない |
+| 金曜夕 | `dayloop retro` | 週の完了率と、持ち越しが多いタスク |
 
-## 1日
+3回持ち越したタスクは、分割・取り下げ・期限変更まで止まる。
 
-```bash
-dayloop plan     # 朝
-dayloop next     # 次の1件
-dayloop check    # 昼
-dayloop close    # 夕。未確定が残ると閉じない
-dayloop retro    # 週末
-```
-
-前日が開いていれば、翌朝はそこから始まる。3回持ち越したタスクは、分割・取り下げ・期限変更まで止まって残る。
-
-コマンドの一覧、終了コード、設定は [docs/guide.md](docs/guide.md)。
+コマンドの残り、終了コード、設定は [docs/guide.md](docs/guide.md)。
 
 ## 試す
 
@@ -28,14 +38,16 @@ dayloop retro    # 週末
 cargo build --release
 ```
 
-`target/release/dayloop.exe` を好きなフォルダに置く。SmartScreen が出たら「詳細情報 → 実行」。昇格は不要。配布用の zip はまだ無い。
+`target/release/dayloop.exe` を好きなフォルダに置く。SmartScreen は「詳細情報 → 実行」。昇格は不要。書き込みは `%LOCALAPPDATA%\dayloop` だけ。配布用の zip はまだ無い。
 
 ## 動く範囲
 
-- Windows 10 / 11
-- クラシック Outlook があるときだけ、メールと予定を読む。無くても計画・確認・クローズ・MCP・常駐は動く
-- ネットワークには送らない。パスワードもトークンも持たない
-- Outlook へは書かない。本文とメールアドレスは既定で読まない
+| | |
+|---|---|
+| OS | Windows 10 / 11。管理者権限は不要 |
+| Outlook | クラシック版があるときだけメールと予定を読む。無くても上のループは動く |
+| 外に出るもの | ない。パスワードもトークンも持たない |
+| Outlook への書き込み | しない。本文とメールアドレスは既定で読まない |
 
 判断の記録は [docs/decisions.md](docs/decisions.md)。MCP のつなぎ方は [docs/mcp-clients.md](docs/mcp-clients.md)。
 
