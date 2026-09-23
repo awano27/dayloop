@@ -88,7 +88,8 @@ pub fn apply_day(
     map: &BTreeMap<String, Sight>,
     now_hhmm: &str,
 ) -> Result<usize> {
-    let mut n = apply(store, date, map)?;
+    let map = with_github(store, date, map);
+    let mut n = apply(store, date, &map)?;
     let events = store.events_for_day(date)?;
     for t in store.open_tasks_for_day(date)? {
         let Some(source_ref) = t.source_ref.as_deref() else {
@@ -103,6 +104,25 @@ pub fn apply_day(
         n += 1;
     }
     Ok(n)
+}
+
+fn with_github(store: &Store, date: &str, map: &BTreeMap<String, Sight>) -> BTreeMap<String, Sight> {
+    let mut map = map.clone();
+    let Ok(tasks) = store.open_tasks_for_day(date) else {
+        return map;
+    };
+    for task in tasks {
+        let Some(key) = task.source_ref else {
+            continue;
+        };
+        if map.contains_key(&key) {
+            continue;
+        }
+        if let Some(sight) = crate::github::fetch_sight(&key) {
+            map.insert(key, sight);
+        }
+    }
+    map
 }
 
 #[cfg(test)]

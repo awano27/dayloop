@@ -3,6 +3,7 @@ pub mod com;
 pub mod config;
 pub mod doctor;
 pub mod engine;
+pub mod github;
 pub mod facts;
 pub mod graph;
 pub mod order;

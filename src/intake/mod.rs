@@ -1,4 +1,5 @@
 pub mod fixture;
+pub mod github_intake;
 pub mod minutes;
 pub mod model;
 pub mod outlook_com;
