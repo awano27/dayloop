@@ -2,8 +2,10 @@
 pub mod com;
 pub mod config;
 pub mod doctor;
+pub mod chat;
 pub mod engine;
 pub mod github;
+pub mod jira;
 pub mod facts;
 pub mod graph;
 pub mod order;

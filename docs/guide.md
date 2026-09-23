@@ -27,7 +27,7 @@ dayloop doctor
 dayloop where
 ```
 
-`config init` は `%LOCALAPPDATA%\dayloop\config.toml` を作る。Jev は既定で `mode = "off"` なので、このままでも台帳だけで動く。
+`config init` は `%LOCALAPPDATA%\dayloop\config.toml` を作る。Jev は既定で `mode = "on"` である。接続先と `DAYLOOP_JEV_API_KEY` が無いあいだは何も書かず、台帳だけで動く。
 
 ID は表示の末尾8文字で指定できる。終了コードは 0 が完了、1 がエラー、2 が未回答あり。
 

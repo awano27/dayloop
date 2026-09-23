@@ -215,6 +215,10 @@ enum IntakeCmd {
     },
     /// 自分に割り当てられた GitHub の Issue と PR を候補にする
     Github,
+    /// 自分に割り当てられた Jira を候補にする
+    Jira,
+    /// 直近の Teams チャットを候補にする
+    Chat,
 }
 
 #[derive(Subcommand)]
@@ -535,6 +539,28 @@ fn run() -> Result<i32> {
                 }
                 Err(_) => {
                     println!("GitHub に聞けません。GITHUB_TOKEN を置くと Issue と PR を候補にします");
+                    0
+                }
+            },
+            IntakeCmd::Jira => match dayloop::jira::fetch_assigned() {
+                Ok(items) => {
+                    let n = dayloop::intake::jira_live::ingest(&store, &items)?;
+                    println!("Jira 候補: {n} 件");
+                    0
+                }
+                Err(_) => {
+                    println!("Jira に聞けません。JIRA_BASE_URL、JIRA_EMAIL、JIRA_API_TOKEN を置くとチケットを候補にします");
+                    0
+                }
+            },
+            IntakeCmd::Chat => match dayloop::chat::fetch_recent() {
+                Ok(items) => {
+                    let n = dayloop::intake::chat_live::ingest(&store, &items)?;
+                    println!("Teams 候補: {n} 件");
+                    0
+                }
+                Err(_) => {
+                    println!("Teams に聞けません。TEAMS_TOKEN か GRAPH_TOKEN を置くとチャットを候補にします");
                     0
                 }
             },
