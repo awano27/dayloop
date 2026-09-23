@@ -213,12 +213,7 @@ pub fn ingest(store: &Store, text: &str) -> Result<MinuteReport> {
 }
 
 fn jev_ready(cfg: &crate::config::Config) -> bool {
-    if !cfg.jev.mode.eq_ignore_ascii_case("on") || cfg.jev.route.trim().is_empty() {
-        return false;
-    }
-    std::env::var("DAYLOOP_JEV_API_KEY")
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false)
+    crate::jev::ready(&cfg.jev.mode, &cfg.jev.route)
 }
 
 #[cfg(test)]

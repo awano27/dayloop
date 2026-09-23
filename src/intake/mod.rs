@@ -1,4 +1,6 @@
 pub mod chat_live;
+pub mod devops_live;
+pub mod recap;
 pub mod fixture;
 pub mod github_intake;
 pub mod jira_live;
@@ -92,7 +94,13 @@ pub fn ingest(
             added += 1;
             continue;
         }
-        match store.add_candidate(&hit.title, "outlook", Some(&hit.source_ref))? {
+        let source_ref = if src.name() == "graph" {
+            format!("graph:mail:{}", m.entry_id)
+        } else {
+            hit.source_ref.clone()
+        };
+        let source_name = if src.name() == "graph" { "mail" } else { "outlook" };
+        match store.add_candidate(&hit.title, source_name, Some(&source_ref))? {
             Some(_) => added += 1,
             None => skipped += 1,
         }
@@ -104,7 +112,13 @@ pub fn ingest(
             added += 1;
             continue;
         }
-        match store.add_candidate(&hit.title, "outlook", Some(&hit.source_ref))? {
+        let source_ref = if src.name() == "graph" {
+            format!("graph:cal:{}:prep", c.entry_id)
+        } else {
+            hit.source_ref.clone()
+        };
+        let source_name = if src.name() == "graph" { "meeting" } else { "outlook" };
+        match store.add_candidate(&hit.title, source_name, Some(&source_ref))? {
             Some(_) => added += 1,
             None => skipped += 1,
         }
@@ -206,10 +220,148 @@ pub fn run_fixture(store: &Store, dir: &std::path::Path, cfg: &Config) -> Result
 pub fn sync_all(store: &Store, cfg: &Config) -> Vec<SyncResult> {
     let mut out = Vec::new();
     if cfg.intake.outlook {
-        out.push(run_outlook(store, cfg, None, false));
+        let outlook = run_outlook(store, cfg, None, false);
+        if outlook.ok {
+            out.push(outlook);
+        } else if crate::chat::token().is_some() {
+            out.push(outlook);
+            out.push(run_graph(store, cfg));
+        } else {
+            out.push(outlook);
+        }
     }
-    out.extend([run_github(store), run_jira(store), run_teams(store)].into_iter().flatten());
+    out.extend(
+        [run_github(store), run_jira(store), run_teams(store), run_devops(store)]
+            .into_iter()
+            .flatten(),
+    );
+    if let Some(inbox) = run_inbox(store) {
+        out.push(inbox);
+    }
     out
+}
+
+fn run_devops(store: &Store) -> Option<SyncResult> {
+    if crate::devops::org().is_none() {
+        return None;
+    }
+    match crate::devops::fetch_assigned() {
+        Ok(items) => devops_live::ingest(store, &items).ok().map(|n| counted("devops", n)),
+        Err(e) => Some(SyncResult {
+            name: "devops".into(),
+            ok: false,
+            candidates_added: 0,
+            candidates_skipped: 0,
+            events: 0,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+fn run_inbox(store: &Store) -> Option<SyncResult> {
+    let dir = crate::paths::inbox_dir();
+    if !dir.is_dir() {
+        return None;
+    }
+    let mut added = 0usize;
+    let entries = std::fs::read_dir(&dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if !matches!(ext, "txt" | "md" | "html" | "htm") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let text = if ext.starts_with("htm") { strip_tags(&raw) } else { raw };
+        let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let actions = recap::actions(&text);
+        if actions.is_empty() {
+            if let Ok(report) = minutes::ingest(store, &text) {
+                added += report.actions;
+            }
+            continue;
+        }
+        for title in actions {
+            let source_ref = format!("minutes:{name}:{title}");
+            if store
+                .add_candidate(&title, "meeting", Some(&source_ref))
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                added += 1;
+            }
+        }
+    }
+    Some(counted("minutes", added))
+}
+
+fn strip_tags(text: &str) -> String {
+    let mut out = String::new();
+    let mut tag = false;
+    for ch in text.chars() {
+        match ch {
+            '<' => tag = true,
+            '>' => tag = false,
+            _ if !tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn run_graph(store: &Store, cfg: &Config) -> SyncResult {
+    let now = Local::now();
+    let since = now - Duration::days(cfg.intake.lookback_days.max(1));
+    let from = now.date_naive();
+    let to = from + Duration::days(1);
+    match crate::graph_office::fetch(since, from, to) {
+        Ok((mails, events)) => {
+            let src = crate::graph_office::Loaded { mails, events };
+            match ingest(store, &src, &cfg.intake, since, now, false) {
+                Ok(mut result) => {
+                    result.name = "mail".into();
+                    result
+                }
+                Err(e) => SyncResult {
+                    name: "mail".into(),
+                    ok: false,
+                    candidates_added: 0,
+                    candidates_skipped: 0,
+                    events: 0,
+                    error: Some(e.to_string()),
+                },
+            }
+        }
+        Err(e) => SyncResult {
+            name: "mail".into(),
+            ok: false,
+            candidates_added: 0,
+            candidates_skipped: 0,
+            events: 0,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+pub fn link(store: &Store) -> Vec<SyncResult> {
+    if cfg!(test) && std::env::var("DAYLOOP_LINK_LIVE").ok().as_deref() != Some("1") {
+        return Vec::new();
+    }
+    let cfg = crate::config::load();
+    let results = sync_all(store, &cfg);
+    for result in &results {
+        if result.candidates_added > 0 || result.events > 0 || !result.ok {
+            println!("{}", result.serve_line());
+            crate::serve::log_event(&result.serve_line());
+        }
+    }
+    results
 }
 
 fn counted(name: &str, added: usize) -> SyncResult {

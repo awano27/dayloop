@@ -269,14 +269,11 @@ fn print_jev_hints(store: &Store, date: &str) {
     if !cfg.jev.mode.eq_ignore_ascii_case("on") {
         return;
     }
-    let key_ok = std::env::var("DAYLOOP_JEV_API_KEY")
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
-    if !key_ok || cfg.jev.route.trim().is_empty() {
+    if !crate::jev::ready(&cfg.jev.mode, &cfg.jev.route) {
         return;
     }
     let mut decider = crate::jev::HttpDecider {
-        route: cfg.jev.route.clone(),
+        route: crate::jev::route_of(&cfg.jev.route),
         timeout_ms: cfg.jev.timeout_ms,
     };
     let min = cfg.jev.commit_confidence.unwrap_or(0.0);
@@ -319,6 +316,7 @@ fn apply_observations(store: &Store, date: &str) -> Result<()> {
 
 /// Evening: every open task becomes done / not_done / carried / dropped, then the day closes.
 pub fn close_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
+    crate::intake::link(store);
     apply_observations(store, date)?;
     graph::apply_known_tasks(store, date)?;
     crate::jev::grow_if_configured(store, date)?;
@@ -377,6 +375,7 @@ pub fn close_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
 
 /// Morning: close leftovers first, triage candidates, pull backlog, confirm today's plan.
 pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
+    crate::intake::link(store);
     for d in store.unclosed_days_before(date)? {
         if store.open_tasks_for_day(&d)?.is_empty() {
             let _ = store.close_day(&d)?;
@@ -458,6 +457,7 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
 
 /// Midday: untouched tasks get a decision.
 pub fn check_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
+    crate::intake::link(store);
     apply_observations(store, date)?;
     graph::apply_known_tasks(store, date)?;
     crate::jev::grow_if_configured(store, date)?;

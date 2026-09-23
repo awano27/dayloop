@@ -2,9 +2,12 @@
 pub mod com;
 pub mod config;
 pub mod doctor;
+pub mod browse;
 pub mod chat;
+pub mod devops;
 pub mod engine;
 pub mod github;
+pub mod graph_office;
 pub mod jira;
 pub mod facts;
 pub mod graph;

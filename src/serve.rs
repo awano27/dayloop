@@ -150,9 +150,6 @@ fn run_phase(phase: Phase, cfg: &Config, state: &mut ServeState, now: DateTime<L
 }
 
 fn execute(phase: Phase, date: &str) -> Result<Outcome> {
-    if matches!(phase, Phase::Plan | Phase::Check) {
-        serve_intake();
-    }
     let store = Store::open()?;
     let ui = Ui::new(true);
     let out = match phase {
@@ -233,28 +230,13 @@ fn retro_due(cfg: &Config, now: DateTime<Local>) -> bool {
     time_reached(now, time_part)
 }
 
-fn serve_intake() {
-    let cfg = config::load();
-    if !cfg.intake.outlook {
-        return;
-    }
-    match Store::open() {
-        Ok(store) => {
-            for r in crate::intake::sync_all(&store, &cfg) {
-                log_event(&r.serve_line());
-            }
-        }
-        Err(e) => log_event(&format!("intake outlook skipped: {e}")),
-    }
-}
-
 fn sleep_until_next_minute() {
     let now = Local::now();
     let secs = 60 - now.timestamp() % 60;
     thread::sleep(Duration::from_secs(secs as u64));
 }
 
-fn log_event(msg: &str) {
+pub(crate) fn log_event(msg: &str) {
     let p = paths::serve_log_path();
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);

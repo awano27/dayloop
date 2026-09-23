@@ -62,7 +62,10 @@ pub fn apply(store: &Store, date: &str, map: &BTreeMap<String, Sight>) -> Result
 }
 
 pub fn meeting_ended(source_ref: &str, events: &[crate::model::Event], now_hhmm: &str) -> bool {
-    let Some(rest) = source_ref.strip_prefix("outlook:cal:") else {
+    let Some(rest) = source_ref
+        .strip_prefix("outlook:cal:")
+        .or_else(|| source_ref.strip_prefix("graph:cal:"))
+    else {
         return false;
     };
     let Some(id) = rest.strip_suffix(":prep") else {
@@ -118,7 +121,10 @@ fn with_github(store: &Store, date: &str, map: &BTreeMap<String, Sight>) -> BTre
         if map.contains_key(&key) {
             continue;
         }
-        if let Some(sight) = crate::github::fetch_sight(&key).or_else(|| crate::jira::fetch_sight(&key)) {
+        if let Some(sight) = crate::github::fetch_sight(&key)
+            .or_else(|| crate::jira::fetch_sight(&key))
+            .or_else(|| crate::devops::fetch_sight(&key))
+        {
             map.insert(key, sight);
         }
     }
