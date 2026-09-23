@@ -238,7 +238,10 @@ pub fn grow_if_configured(store: &Store, date: &str) -> Result<usize> {
     if !key_ok || cfg.jev.route.trim().is_empty() {
         return Ok(0);
     }
-    let floor = cfg.jev.commit_confidence.unwrap_or(DEFAULT_FLOOR);
+    // An empty floor means the 20-case band has not been measured. Hints only.
+    let Some(floor) = cfg.jev.commit_confidence else {
+        return Ok(0);
+    };
     let mut decider = HttpDecider {
         route: cfg.jev.route.clone(),
         timeout_ms: cfg.jev.timeout_ms,

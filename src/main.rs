@@ -213,6 +213,8 @@ enum IntakeCmd {
     Teams {
         file: std::path::PathBuf,
     },
+    /// 自分に割り当てられた GitHub の Issue と PR を候補にする
+    Github,
 }
 
 #[derive(Subcommand)]
@@ -525,6 +527,17 @@ fn run() -> Result<i32> {
                 println!("Teams 候補: {n} 件");
                 0
             }
+            IntakeCmd::Github => match dayloop::github::fetch_assigned() {
+                Ok(items) => {
+                    let n = dayloop::intake::github_intake::ingest(&store, &items)?;
+                    println!("GitHub 候補: {n} 件");
+                    0
+                }
+                Err(_) => {
+                    println!("GitHub に聞けません。GITHUB_TOKEN を置くと Issue と PR を候補にします");
+                    0
+                }
+            },
         },
         Cmd::JevEval { live } => run_jev_eval(live)?,
         Cmd::Doctor
