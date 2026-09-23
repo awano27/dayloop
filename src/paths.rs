@@ -44,3 +44,7 @@ pub fn serve_log_path() -> PathBuf {
 pub fn notify_file_path() -> PathBuf {
     data_dir().join("notify.txt")
 }
+
+pub fn inbox_dir() -> PathBuf {
+    data_dir().join("inbox")
+}

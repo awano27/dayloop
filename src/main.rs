@@ -219,6 +219,16 @@ enum IntakeCmd {
     Jira,
     /// 直近の Teams チャットを候補にする
     Chat,
+    /// 自分に割り当てられた Azure DevOps Boards の作業項目を候補にする
+    Devops,
+    /// 届いている入口をまとめて読む
+    Sync,
+    /// ブラウザの Outlook か Teams を、開く・次へ・終わりだけで読む
+    Browse {
+        /// mail または teams
+        #[arg(long, default_value = "mail")]
+        site: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -553,6 +563,29 @@ fn run() -> Result<i32> {
                     0
                 }
             },
+            IntakeCmd::Devops => match dayloop::devops::fetch_assigned() {
+                Ok(items) => {
+                    let n = dayloop::intake::devops_live::ingest(&store, &items)?;
+                    println!("DevOps 候補: {n} 件");
+                    0
+                }
+                Err(_) => {
+                    println!("Azure DevOps に聞けません。AZURE_DEVOPS_ORG と、PAT または az login が必要です");
+                    0
+                }
+            },
+            IntakeCmd::Browse { site } => {
+                let n = dayloop::browse::run(&store, &site)?;
+                println!("ブラウザから候補: {n} 件");
+                0
+            }
+            IntakeCmd::Sync => {
+                let results = dayloop::intake::link(&store);
+                if results.iter().all(|r| r.ok && r.candidates_added == 0 && r.events == 0) {
+                    println!("新しい候補はありません");
+                }
+                0
+            }
             IntakeCmd::Chat => match dayloop::chat::fetch_recent() {
                 Ok(items) => {
                     let n = dayloop::intake::chat_live::ingest(&store, &items)?;
@@ -581,15 +614,12 @@ fn run_jev_eval(live: bool) -> Result<i32> {
     let mut rows = jev_eval::load_sheet(&text)?;
     if live {
         let cfg = config::load();
-        let key_ok = std::env::var("DAYLOOP_JEV_API_KEY")
-            .map(|k| !k.trim().is_empty())
-            .unwrap_or(false);
-        if !key_ok || cfg.jev.route.trim().is_empty() {
-            eprintln!("Jev の route か DAYLOOP_JEV_API_KEY がありません");
+        if !jev::ready(&cfg.jev.mode, &cfg.jev.route) {
+            eprintln!("Jev のキーがありません。Codex と同じ TYPESAFE_API_KEY を置くか、DAYLOOP_JEV_API_KEY を置いてください");
             return Ok(2);
         }
         let mut decider = jev::HttpDecider {
-            route: cfg.jev.route.clone(),
+            route: jev::route_of(&cfg.jev.route),
             timeout_ms: cfg.jev.timeout_ms,
         };
         let choices = vec!["task".to_string(), "info".to_string(), "ask".to_string()];

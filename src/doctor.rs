@@ -220,9 +220,10 @@ pub fn run() {
         Err(_) => info("LLM エンドポイント", "未設定（テンプレート出力で動作します）"),
     }
 
-    match std::env::var("DAYLOOP_JEV_API_KEY") {
-        Ok(key) if !key.trim().is_empty() => ok("Jev", "API キーは設定されています"),
-        _ => info("Jev", "API キー未設定（未知の節は質問のまま）"),
+    if !crate::jev::api_key().is_empty() {
+        ok("Jev", "Codex と同じ TypeSafe のキーを使います");
+    } else {
+        info("Jev", "API キー未設定（未知の節は質問のまま）");
     }
 
     println!();

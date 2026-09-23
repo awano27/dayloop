@@ -30,6 +30,62 @@ const CANDIDATE_CHOICES: &[&str] = &["today", "backlog", "shelve", "reject", "as
 /// Used when `commit_confidence` is unset and Jev is on.
 pub const DEFAULT_FLOOR: f64 = 0.5;
 
+/// Codex の Jev（TypeSafe）と同じ接続先。`route` が空のときの既定。
+pub const TYPESAFE_ROUTE: &str = "https://api.typesafe.ai/v1/systemone";
+
+pub fn route_of(configured: &str) -> String {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        TYPESAFE_ROUTE.to_string()
+    } else {
+        configured.to_string()
+    }
+}
+
+/// `DAYLOOP_JEV_API_KEY`、無ければ Codex と同じ `TYPESAFE_API_KEY`。
+pub fn api_key() -> String {
+    for name in ["DAYLOOP_JEV_API_KEY", "TYPESAFE_API_KEY"] {
+        if let Ok(value) = std::env::var(name) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return value;
+            }
+        }
+    }
+    codex_typesafe_key().unwrap_or_default()
+}
+
+fn codex_typesafe_key() -> Option<String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()?;
+    let path = std::path::PathBuf::from(home)
+        .join(".codex")
+        .join("config.toml");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    value
+        .get("mcp_servers")?
+        .get("jev")?
+        .get("env")?
+        .get("TYPESAFE_API_KEY")?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+pub fn ready(mode: &str, _route: &str) -> bool {
+    mode.eq_ignore_ascii_case("on") && !api_key().is_empty() && live_allowed()
+}
+
+fn live_allowed() -> bool {
+    if cfg!(test) {
+        return std::env::var("DAYLOOP_JEV_LIVE").ok().as_deref() == Some("1");
+    }
+    true
+}
+
 pub fn disposition_choices() -> Vec<String> {
     let mut choices = vec!["done".to_string(), "start".to_string(), "ask".to_string()];
     for action in ["not_done", "carry", "drop"] {
@@ -232,15 +288,12 @@ pub fn grow_if_configured(store: &Store, date: &str) -> Result<usize> {
     if !cfg.jev.mode.eq_ignore_ascii_case("on") {
         return Ok(0);
     }
-    let key_ok = std::env::var("DAYLOOP_JEV_API_KEY")
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
-    if !key_ok || cfg.jev.route.trim().is_empty() {
+    if !ready(&cfg.jev.mode, &cfg.jev.route) {
         return Ok(0);
     }
     let floor = cfg.jev.commit_confidence.unwrap_or(DEFAULT_FLOOR);
     let mut decider = HttpDecider {
-        route: cfg.jev.route.clone(),
+        route: route_of(&cfg.jev.route),
         timeout_ms: cfg.jev.timeout_ms,
     };
     grow(store, date, &mut decider, floor)
@@ -279,19 +332,17 @@ pub struct HttpDecider {
 
 impl Decider for HttpDecider {
     fn decide(&mut self, state: &str, choices: &[String]) -> JevOutcome {
-        if self.route.trim().is_empty() {
+        if self.route.trim().is_empty() || !live_allowed() || api_key().is_empty() {
             return JevOutcome::Unavailable;
         }
-        let body = serde_json::json!({
-            "state": state,
-            "questions": [{ "prompt": "選択", "choices": choices }],
-        });
+        let body = request_body(state, choices);
         let agent = ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_millis(self.timeout_ms))
             .build();
         let response = agent
             .post(self.route.trim())
             .set("Authorization", &auth_header())
+            .set("User-Agent", "dayloop")
             .send_json(body);
         match response {
             Ok(resp) => parse_body(&resp.into_string().unwrap_or_default()),
@@ -304,10 +355,30 @@ impl Decider for HttpDecider {
 }
 
 fn auth_header() -> String {
-    match std::env::var("DAYLOOP_JEV_API_KEY") {
-        Ok(key) if !key.is_empty() => format!("Bearer {key}"),
-        _ => String::new(),
+    let key = api_key();
+    if key.is_empty() {
+        String::new()
+    } else {
+        format!("Bearer {key}")
     }
+}
+
+fn request_body(state: &str, choices: &[String]) -> serde_json::Value {
+    let mut criteria = serde_json::Map::new();
+    for choice in choices {
+        criteria.insert(choice.clone(), serde_json::Value::Null);
+    }
+    serde_json::json!({
+        "state": state,
+        "model": "jev-latest",
+        "questions": {
+            "pick": {
+                "type": "choice",
+                "instructions": "この選択肢から1つ選ぶ",
+                "criteria": criteria
+            }
+        }
+    })
 }
 
 fn parse_body(text: &str) -> JevOutcome {
@@ -318,12 +389,14 @@ fn parse_body(text: &str) -> JevOutcome {
         return JevOutcome::Unavailable;
     }
     let choice = v
-        .get("choice")
+        .pointer("/answers/pick/choice")
         .and_then(|x| x.as_str())
+        .or_else(|| v.get("choice").and_then(|x| x.as_str()))
         .or_else(|| v.pointer("/answer/choice").and_then(|x| x.as_str()));
     let confidence = v
-        .get("confidence")
+        .pointer("/answers/pick/confidence")
         .and_then(|x| x.as_f64())
+        .or_else(|| v.get("confidence").and_then(|x| x.as_f64()))
         .or_else(|| v.pointer("/answer/confidence").and_then(|x| x.as_f64()))
         .unwrap_or(0.0);
     match choice {
@@ -332,5 +405,22 @@ fn parse_body(text: &str) -> JevOutcome {
             confidence,
         },
         _ => JevOutcome::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_typesafe_choice() {
+        let text = r#"{"answers":{"pick":{"type":"choice","choice":"carry","confidence":0.8}}}"#;
+        match parse_body(text) {
+            JevOutcome::Answer { choice, confidence } => {
+                assert_eq!(choice, "carry");
+                assert!((confidence - 0.8).abs() < 0.001);
+            }
+            JevOutcome::Unavailable => panic!("expected a choice"),
+        }
     }
 }

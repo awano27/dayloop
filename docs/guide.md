@@ -167,7 +167,7 @@ send_body = false
 generator = "rules"
 ```
 
-環境変数 `DAYLOOP_JEV_API_KEY` に鍵を置く。本文は送らない。送るのは正規化した件名、期限、空き、持ち越し回数と、閉じた選択肢だけである。
+鍵は `DAYLOOP_JEV_API_KEY`、無ければ Codex と同じ `TYPESAFE_API_KEY` を使う。`route` が空なら接続先は `https://api.typesafe.ai/v1/systemone`。本文は送らない。送るのは正規化した件名、期限、空き、持ち越し回数と、閉じた選択肢だけである。
 
 `mode = "on"` だと、取り込みの直後と朝昼夕の前に、枝の無い候補とタスクを Jev に渡す。確度が `commit_confidence` 以上の答えは枝にして台帳へ書く。項目が空なら下限は 0.5。`ask`、下限未満、呼び出し失敗は人の質問として残る。
 

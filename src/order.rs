@@ -131,6 +131,7 @@ pub fn next_open(store: &Store, date: &str) -> Result<Option<Task>> {
 /// Apply observed completion and known graph edges, then return the first task
 /// that still needs a person. Already-decided work moves on before this returns.
 pub fn prepare_next(store: &Store, date: &str) -> Result<Option<Task>> {
+    crate::intake::link(store);
     let cfg = crate::config::load();
     let map = crate::observe::load_map(&cfg.observe)?;
     let now = chrono::Local::now().format("%H:%M").to_string();
