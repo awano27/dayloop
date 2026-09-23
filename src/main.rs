@@ -225,7 +225,7 @@ enum IntakeCmd {
     Sync,
     /// ブラウザの Outlook か Teams を、開く・次へ・終わりだけで読む
     Browse {
-        /// mail または teams
+        /// mail、gmail、teams、boards
         #[arg(long, default_value = "mail")]
         site: String,
     },

@@ -4,7 +4,7 @@
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
-use crate::jev::{self, HttpDecider, JevOutcome};
+use crate::jev::{self, Decider, HttpDecider, JevOutcome};
 use crate::paths;
 use crate::store::Store;
 
@@ -19,8 +19,10 @@ pub struct PageItem {
 pub fn site_url(site: &str) -> Result<&'static str> {
     match site {
         "mail" => Ok("https://outlook.office.com/mail/"),
+        "gmail" => Ok("https://mail.google.com/mail/u/0/#inbox"),
         "teams" => Ok("https://teams.microsoft.com/v2/"),
-        _ => anyhow::bail!("site は mail か teams です"),
+        "boards" => Ok("https://dev.azure.com/pcedx/pcedx-1/_workitems/recentlyupdated/"),
+        _ => anyhow::bail!("site は mail、gmail、teams、boards のいずれかです"),
     }
 }
 
@@ -33,64 +35,108 @@ pub fn choices(items: &[PageItem]) -> Vec<String> {
 pub fn allowed_label(label: &str) -> bool {
     let lower = label.to_lowercase();
     let banned = [
-        "送信", "削除", "返信", "転送", "破棄", "send", "delete", "reply", "forward", "discard",
+        "送信", "削除", "返信", "転送", "破棄", "作成", "send", "delete", "reply", "forward",
+        "discard", "compose",
     ];
     !label.trim().is_empty() && banned.iter().all(|word| !lower.contains(word))
+}
+
+pub fn subject_line(label: &str) -> String {
+    let line = label.lines().next().unwrap_or(label).trim();
+    let head = line.split(" - ").next().unwrap_or(line).trim();
+    head.chars().take(80).collect()
+}
+
+pub fn is_language_picker(items: &[PageItem]) -> bool {
+    const NAMES: &[&str] = &[
+        "Afrikaans", "Deutsch", "English", "Español", "Français", "Italiano", "日本語",
+        "中文", "한국어", "Português",
+    ];
+    items
+        .iter()
+        .filter(|item| NAMES.iter().any(|name| item.label.contains(name)))
+        .count()
+        >= 3
+}
+
+pub fn keep_message(outcome: &JevOutcome, text: &str, keywords: &[String]) -> bool {
+    match outcome {
+        JevOutcome::Answer { choice, confidence }
+            if choice == "keep" && *confidence >= jev::DEFAULT_FLOOR =>
+        {
+            true
+        }
+        JevOutcome::Answer { .. } => false,
+        JevOutcome::Unavailable => keywords.iter().any(|word| !word.is_empty() && text.contains(word.as_str())),
+    }
 }
 
 pub fn run(store: &Store, site: &str) -> Result<usize> {
     let url = site_url(site)?;
     let mut page = Browser::launch()?;
     page.navigate(url)?;
-    std::thread::sleep(std::time::Duration::from_secs(4));
     let mut opened = 0usize;
     let mut added = 0usize;
     let mut decider = HttpDecider {
         route: jev::route_of(""),
         timeout_ms: 4000,
     };
-    while opened < MAX_OPENS {
-        let items = page.list_items()?;
-        if items.is_empty() {
-            println!("一覧がまだ見えません。ブラウザでサインインしてから、もう一度実行してください");
+    let mut announced = false;
+    let mut items = Vec::new();
+    for _ in 0..30 {
+        items = page.list_items()?;
+        if !items.is_empty() {
             break;
         }
-        let choice = match decider.decide(&format!("{site} の一覧です。読むものを1つ選ぶ"), &choices(&items)) {
-            JevOutcome::Answer { choice, confidence } if confidence >= jev::DEFAULT_FLOOR => choice,
-            _ => {
-                println!("Jev が開けなかったので、見えている件名だけを候補にします");
-                added += save_labels(store, site, &items)?;
-                break;
-            }
-        };
-        if choice == "stop" {
-            break;
+        if !announced {
+            println!("一覧を待っています。開いた窓でサインインしてください");
+            announced = true;
         }
-        let Some(index) = choice.strip_prefix("open:").and_then(|n| n.parse::<usize>().ok()) else {
-            break;
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    if items.is_empty() {
+        println!("一覧がまだ見えません。開いた窓は残してあります");
+        return Ok(0);
+    }
+    if is_language_picker(&items) {
+        println!("言語の選択画面です。受信トレイが出るまで操作してください。候補には入れていません");
+        return Ok(0);
+    }
+    let keywords = crate::config::load().intake.keywords;
+    let limit = MAX_OPENS.min(items.len());
+    for index in 0..limit {
+        let Some(item) = items.iter().find(|item| item.index == index).cloned() else {
+            continue;
         };
-        let Some(item) = items.iter().find(|item| item.index == index) else {
-            break;
-        };
+        let subject = subject_line(&item.label);
         page.open(index)?;
         std::thread::sleep(std::time::Duration::from_secs(2));
         let body = page.read_pane().unwrap_or_default();
-        if save_one(store, site, &item.label, &body)? {
+        let evidence = format!("{subject}\n{body}");
+        let kind = if site == "boards" { "作業項目" } else { "メール" };
+        let outcome = decider.decide(
+            &format!("この{kind}を今日の候補にしますか。\n{evidence}"),
+            &["keep".into(), "skip".into()],
+        );
+        match &outcome {
+            JevOutcome::Answer { choice, confidence } => {
+                println!("開いた: {subject} / Jev: {choice} ({confidence:.2})");
+            }
+            JevOutcome::Unavailable => {
+                println!("開いた: {subject} / Jev は呼べなかったので、キーワードだけで判断します");
+            }
+        }
+        if keep_message(&outcome, &evidence, &keywords) && save_one(store, site, &subject, &body)? {
             added += 1;
         }
         opened += 1;
-    }
-    Ok(added)
-}
-
-fn save_labels(store: &Store, site: &str, items: &[PageItem]) -> Result<usize> {
-    let mut n = 0;
-    for item in items {
-        if save_one(store, site, &item.label, "")? {
-            n += 1;
+        items = page.list_items().unwrap_or_default();
+        if is_language_picker(&items) {
+            break;
         }
     }
-    Ok(n)
+    let _ = opened;
+    Ok(added)
 }
 
 fn save_one(store: &Store, site: &str, label: &str, body: &str) -> Result<bool> {
@@ -98,7 +144,11 @@ fn save_one(store: &Store, site: &str, label: &str, body: &str) -> Result<bool> 
     if title.is_empty() || !allowed_label(title) {
         return Ok(false);
     }
-    let source = if site == "teams" { "teams" } else { "mail" };
+    let source = match site {
+        "teams" => "teams",
+        "boards" => "ticket",
+        _ => "mail",
+    };
     let source_ref = format!("browse:{site}:{title}");
     let shown = if body.trim().is_empty() {
         title.to_string()
@@ -120,15 +170,19 @@ impl Browser {
         let profile = paths::data_dir().join("browser");
         std::fs::create_dir_all(&profile)?;
         let port = 9333;
-        std::process::Command::new(edge)
-            .args([
-                &format!("--user-data-dir={}", profile.display()),
-                &format!("--remote-debugging-port={port}"),
-                "--no-first-run",
-                "--new-window",
-                "about:blank",
-            ])
-            .spawn()?;
+        if wait_page(port).is_err() {
+            spawn_detached(
+                &edge,
+                &[
+                    format!("--user-data-dir={}", profile.display()),
+                    format!("--remote-debugging-port={port}"),
+                    "--no-first-run".into(),
+                    "--new-window".into(),
+                    "--start-maximized".into(),
+                    "about:blank".into(),
+                ],
+            )?;
+        }
         let ws = wait_page(port)?;
         let (socket, _) = tungstenite::connect(ws)?;
         Ok(Self { socket, next_id: 1 })
@@ -141,7 +195,7 @@ impl Browser {
     }
 
     fn list_items(&mut self) -> Result<Vec<PageItem>> {
-        let value = self.eval(LIST_JS)?;
+        let value = self.eval(&format!("{DOCS_JS}\n{LIST_JS}"))?;
         let labels = value.as_array().cloned().unwrap_or_default();
         Ok(labels
             .into_iter()
@@ -158,14 +212,14 @@ impl Browser {
     }
 
     fn open(&mut self, index: usize) -> Result<()> {
-        self.eval(&format!("document.querySelector('[data-dayloop=\"{index}\"]').click(); 'ok'"))?;
+        self.eval(&format!(
+            "{DOCS_JS}\n(() => {{ for (const doc of dayloopDocs()) {{ const el = doc.querySelector('[data-dayloop=\"{index}\"]'); if (el) {{ el.click(); return 'ok'; }} }} return 'miss'; }})()"
+        ))?;
         Ok(())
     }
 
     fn read_pane(&mut self) -> Result<String> {
-        let value = self.eval(
-            "(document.querySelector('[role=main]') || document.body).innerText.slice(0, 2000)",
-        )?;
+        let value = self.eval(&format!("{DOCS_JS}\n{READ_JS}"))?;
         Ok(value.as_str().unwrap_or("").to_string())
     }
 
@@ -218,6 +272,23 @@ fn wait_page(port: u16) -> Result<String> {
     anyhow::bail!("ブラウザが起動しませんでした")
 }
 
+fn spawn_detached(edge: &std::path::Path, args: &[String]) -> Result<()> {
+    let mut parts = vec![format!("\"{}\"", edge.display())];
+    parts.extend(args.iter().map(|arg| format!("\"{arg}\"")));
+    let command_line = parts.join(" ");
+    let script = format!(
+        "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{ CommandLine = '{}' }} | Out-Null",
+        command_line.replace('\'', "''")
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("ブラウザを切り離して起動できませんでした");
+    }
+    Ok(())
+}
+
 fn edge_path() -> Option<std::path::PathBuf> {
     let candidates = [
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -226,18 +297,39 @@ fn edge_path() -> Option<std::path::PathBuf> {
     candidates.into_iter().map(std::path::PathBuf::from).find(|path| path.exists())
 }
 
+const DOCS_JS: &str = r#"function dayloopDocs() {
+  const docs = [document];
+  for (const frame of document.querySelectorAll('iframe')) {
+    try { if (frame.contentDocument) docs.push(frame.contentDocument); } catch (e) {}
+  }
+  return docs;
+}
+"#;
+
 const LIST_JS: &str = r#"(() => {
-  const bad = /送信|削除|返信|転送|破棄|send|delete|reply|forward|discard/i;
-  const nodes = [...document.querySelectorAll('[role="option"],[role="listitem"]')];
+  const bad = /送信|削除|返信|転送|破棄|作成|send|delete|reply|forward|discard|compose/i;
   const items = [];
-  for (const el of nodes) {
-    const name = (el.getAttribute('aria-label') || el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 180);
-    if (!name || bad.test(name)) continue;
-    el.setAttribute('data-dayloop', String(items.length));
-    items.push(name);
+  for (const doc of dayloopDocs()) {
+    const nodes = [...doc.querySelectorAll('tr.zA, [role="option"], [role="listitem"], [role="row"]')];
+    for (const el of nodes) {
+      const name = (el.getAttribute('aria-label') || el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 180);
+      if (!name || name.length < 8 || bad.test(name)) continue;
+      el.setAttribute('data-dayloop', String(items.length));
+      items.push(name);
+      if (items.length >= 8) break;
+    }
     if (items.length >= 8) break;
   }
   return items;
+})()"#;
+
+const READ_JS: &str = r#"(() => {
+  for (const doc of dayloopDocs()) {
+    const pane = doc.querySelector('[role="main"]') || doc.body;
+    const text = (pane && pane.innerText || '').trim();
+    if (text.length > 80) return text.slice(0, 2000);
+  }
+  return '';
 })()"#;
 
 #[cfg(test)]
@@ -249,6 +341,26 @@ mod tests {
         assert!(!allowed_label("返信"));
         assert!(!allowed_label("Delete"));
         assert!(allowed_label("見積の確認"));
+        assert!(!allowed_label("Compose"));
+        assert_eq!(site_url("gmail").unwrap(), "https://mail.google.com/mail/u/0/#inbox");
+        assert_eq!(
+            site_url("boards").unwrap(),
+            "https://dev.azure.com/pcedx/pcedx-1/_workitems/recentlyupdated/"
+        );
+        let picker = vec![
+            PageItem { index: 0, label: "English".into() },
+            PageItem { index: 1, label: "Deutsch".into() },
+            PageItem { index: 2, label: "日本語".into() },
+        ];
+        assert!(is_language_picker(&picker));
+        assert_eq!(subject_line("田中 見積の確認 - 明日まで"), "田中 見積の確認");
+        assert!(keep_message(
+            &JevOutcome::Answer { choice: "keep".into(), confidence: 0.8 },
+            "見積",
+            &[]
+        ));
+        assert!(!keep_message(&JevOutcome::Unavailable, "ニュースレター", &["お願い".into()]));
+        assert!(keep_message(&JevOutcome::Unavailable, "お願い 確認", &["お願い".into()]));
         let items = vec![PageItem { index: 0, label: "見積の確認".into() }];
         assert_eq!(choices(&items), vec!["open:0".to_string(), "stop".to_string()]);
     }
