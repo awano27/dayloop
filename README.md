@@ -4,26 +4,26 @@
 
 ```mermaid
 flowchart TD
-  loop["1日のループ<br/>plan → next → check → close"]
-  graph{"判断グラフ<br/>同じ節に枝がある?"}
-  apply["枝を台帳へ適用<br/>質問しない"]
-  jev["Jev<br/>未知の判断だけ"]
-  human["人が答える<br/>revise で直す"]
-  grow["枝を書く<br/>間違いは差し替える"]
-  shut{"全部、決着した?"}
-  tomorrow["翌朝は直した枝から"]
+  day["1日のループ<br>plan, next, check, close"]
+  decide{"判断グラフ<br>同じ節に枝がある?"}
+  known["枝を台帳へ適用<br>質問しない"]
+  ask["Jev<br>未知の判断だけ"]
+  person["人が答える<br>revise で直す"]
+  edge["枝を書く<br>間違いは差し替える"]
+  done{"全部、決着した?"}
+  morning["翌朝は直した枝から"]
 
-  loop --> graph
-  graph -->|ある| apply
-  graph -->|ない| jev
-  jev -->|確度が足りる| grow
-  jev -->|足りない・オフ| human
-  human --> grow
-  grow --> apply
-  apply --> shut
-  shut -->|未確定が残る| loop
-  shut -->|閉じた| tomorrow
-  tomorrow --> loop
+  day --> decide
+  decide -->|ある| known
+  decide -->|ない| ask
+  ask -->|確度が足りる| edge
+  ask -->|足りない・オフ| person
+  person --> edge
+  edge --> known
+  known --> done
+  done -->|未確定が残る| day
+  done -->|閉じた| morning
+  morning --> day
 ```
 
 朝に予定を決め、日中は次の1件を出し、昼に未着手を確認し、夕に1件ずつ決着させる。未確定が残る日は台帳が閉じない。前日が開いたままなら、翌朝のループはそこから始まる。
