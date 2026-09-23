@@ -808,6 +808,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         ensure_column(conn, "tasks", column, decl)?;
     }
     conn.execute_batch(crate::graph::GRAPH_SCHEMA)?;
+    conn.execute_batch(crate::screen::SCHEMA)?;
     conn.pragma_update(None, "user_version", 2)?;
     Ok(())
 }

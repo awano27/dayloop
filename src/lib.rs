@@ -23,6 +23,7 @@ pub mod notify;
 pub mod paths;
 pub mod reason;
 pub mod rituals;
+pub mod screen;
 pub mod serve;
 pub mod startup;
 pub mod store;

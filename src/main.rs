@@ -14,6 +14,7 @@ use dayloop::model;
 use dayloop::model::State;
 use dayloop::paths;
 use dayloop::rituals::{self, Outcome, Ui};
+use dayloop::screen;
 use dayloop::serve;
 use dayloop::startup;
 use dayloop::store::{self, Store};
@@ -179,6 +180,14 @@ enum Cmd {
     /// 外部ソースから Candidate / 予定を取り込む
     #[command(subcommand)]
     Intake(IntakeCmd),
+    /// 前面の Outlook か Teams に出ている文章を取り込む
+    Capture {
+        /// この1回だけ本文を Jev に送って評価する。既定では送らない
+        #[arg(long)]
+        send: bool,
+        #[command(subcommand)]
+        action: Option<CaptureCmd>,
+    },
     /// 未知20件の一致を帯で出す。設定も台帳も変えない
     JevEval {
         #[arg(long)]
@@ -229,6 +238,22 @@ enum IntakeCmd {
         #[arg(long, default_value = "mail")]
         site: String,
     },
+}
+
+#[derive(Subcommand)]
+enum CaptureCmd {
+    /// 取り込みを候補にする。今日の予定には入れない
+    Accept { id: String },
+    /// 候補名を直す。評価は残す
+    Revise {
+        id: String,
+        #[arg(long)]
+        title: String,
+    },
+    /// 保留する。記録は消さない
+    Hold { id: String },
+    /// 最近の取り込み
+    List,
 }
 
 #[derive(Subcommand)]
@@ -507,6 +532,28 @@ fn run() -> Result<i32> {
             markdown::export(&store, &d)?;
             0
         }
+        Cmd::Capture { send, action } => match action {
+            Some(CaptureCmd::Accept { id }) => {
+                println!("{}", screen::accept(&store, &id)?);
+                0
+            }
+            Some(CaptureCmd::Revise { id, title }) => {
+                println!("{}", screen::revise(&store, &id, &title)?);
+                0
+            }
+            Some(CaptureCmd::Hold { id }) => {
+                println!("{}", screen::hold(&store, &id)?);
+                0
+            }
+            Some(CaptureCmd::List) => {
+                println!("{}", screen::list(&store)?);
+                0
+            }
+            None => {
+                println!("{}", screen::run_foreground(&store, send)?);
+                0
+            }
+        },
         Cmd::Intake(sub) => match sub {
             IntakeCmd::Outlook { since, dry_run } => {
                 let cfg = config::load();

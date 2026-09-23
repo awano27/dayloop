@@ -132,6 +132,18 @@ Teams JSON:
 
 Outlook はクラシック Outlook の COM を使う。本文とメールアドレスは既定で読まない。新しい Outlook だけが入っている PC では、1行のメッセージを出して終了コード 0 で戻る。
 
+今開いている Outlook か Teams の文章は、別のコマンドで1回だけ読む。クリックも送信もしない。本文は手元に残り、Jev には `--send` を付けたときだけ渡す。
+
+```powershell
+dayloop capture
+dayloop capture --send
+dayloop capture accept <id>
+dayloop capture revise <id> --title "仕様書をレビューする"
+dayloop capture hold <id>
+```
+
+`accept` は候補にするだけで、今日の予定には入れない。予定にするときは `dayloop candidates accept` を続ける。取得できなかったときは「取得失敗」と出る。読み取りプログラムは `DAYLOOP_WINCLI`、`%LOCALAPPDATA%\dayloop\bin\wincli.exe`、または同じ場所の `Sbroenne.WindowsMcp.exe` である。dayloop は `ui_read` だけを許可して起動する。
+
 ## 証跡で完了にする
 
 `config.toml` に観測ファイルを書く。

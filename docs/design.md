@@ -62,12 +62,17 @@ flowchart TD
 | `jira.rs` | 割り当てられた未完了 | ticket |
 | `devops.rs` | WIQL で `@Me` の作業項目 | ticket |
 | `chat.rs` | Graph の直近チャット | teams |
+| `screen.rs` | 前面の窓は Windows の API で特定する。本文は `ui_read` だけを許可した実行ファイルで、要素を指定せず読む | outlook、teams |
 
 ブラウザのプロファイルは `%LOCALAPPDATA%\dayloop\browser` である。Edge はコマンド終了後も残るよう、ジョブから切り離して起動する。接続はローカルのリモートデバッグポート 9333 である。一覧は文書と iframe の `tr.zA`、`role=option`、`role=listitem`、`role=row` を見る。
 
 開く件数は最大5件である。開いた件名と本文の先頭を Jev に渡し、選択肢は `keep` と `skip` だけである。言語選択画面は3つ以上の言語名で判定し、候補にしない。Jev が呼べないときは、設定のキーワードが本文か件名にあるものだけを残す。
 
 DevOps のブラウザ URL は `https://dev.azure.com/pcedx/pcedx-1/_workitems/recentlyupdated/` である。API の組織名とは別に持つ。
+
+`dayloop capture` は `intake::link` から呼ばない。読むのは前面の1窓で、プロセスが Outlook か Teams のときだけ本文を取る。それ以外の窓は本文を読まず、取得失敗として残す。空の文章と、ボタン名だけの文章も取得失敗である。依頼が無かった、とは書かない。実行ファイルは `wincli` か `Sbroenne.WindowsMcp.exe` で、後者は `--tools ui_read` だけで起動する。クリック、入力、送信のツールは渡さない。
+
+取れた本文は `screen_captures` に置く。`screen_evals` は設問版 `screen-v1`、モデル名、送ったかどうか、5つの選択、確度、理由コード、原文の引用を1行で持つ。`screen_decisions` は採用、修正、保留を追記する。修正しても評価の行は消さない。候補の `source_ref` は `screen:` に記録の id を付けたもので、画面の要素 id ではない。Jev への送信は `--send` のときだけである。鍵が無い、呼び出しに失敗したときは評価を保留し、本文は手元に残す。
 
 ## 5. 証跡による完了
 
@@ -108,6 +113,6 @@ MCP のツールは、取得、計画、確定、追加、状態変更、分割�
 ## 9. 今の限界
 
 - ブラウザ候補の題名に、ボタン名や列名が混ざることがある。DevOps の `test` で確認した
-- デスクトップの新しい Outlook と新しい Teams の本文は読めない
+- デスクトップの Outlook と Teams は、wincli が本文を返したときだけ `capture` で残せる。返らなければ取得失敗であり、この PC で本文が取れるかは起動して確認する
 - Graph、GitHub、Jira、DevOps API は、この PC では資格情報が無く、実読取は未確認である
 - 確度 0.5 は20件の測定結果ではない
