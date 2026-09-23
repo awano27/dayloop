@@ -180,15 +180,12 @@ pub struct MinuteReport {
 pub fn ingest(store: &Store, text: &str) -> Result<MinuteReport> {
     let cfg = crate::config::load();
     let lines = if cfg.minutes.generator.eq_ignore_ascii_case("llm") && jev_ready(&cfg) {
-        if let Some(floor) = cfg.jev.commit_confidence {
-            let mut decider = crate::jev::HttpDecider {
-                route: cfg.jev.route.clone(),
-                timeout_ms: cfg.jev.timeout_ms,
-            };
-            judge_ignored(text, &mut decider, floor)
-        } else {
-            read_minutes(text)
-        }
+        let mut decider = crate::jev::HttpDecider {
+            route: cfg.jev.route.clone(),
+            timeout_ms: cfg.jev.timeout_ms,
+        };
+        let floor = cfg.jev.commit_confidence.unwrap_or(crate::jev::DEFAULT_FLOOR);
+        judge_ignored(text, &mut decider, floor)
     } else {
         read_minutes(text)
     };

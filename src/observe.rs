@@ -118,7 +118,7 @@ fn with_github(store: &Store, date: &str, map: &BTreeMap<String, Sight>) -> BTre
         if map.contains_key(&key) {
             continue;
         }
-        if let Some(sight) = crate::github::fetch_sight(&key) {
+        if let Some(sight) = crate::github::fetch_sight(&key).or_else(|| crate::jira::fetch_sight(&key)) {
             map.insert(key, sight);
         }
     }

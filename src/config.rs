@@ -23,7 +23,7 @@ meeting_prep = true
 meeting_prep_only_required = true
 
 [jev]
-mode = "off"
+mode = "on"
 route = ""
 timeout_ms = 2000
 send_body = false
@@ -205,7 +205,7 @@ impl Default for JevConfig {
 }
 
 fn default_jev_mode() -> String {
-    "off".into()
+    "on".into()
 }
 
 fn default_jev_timeout() -> u64 {

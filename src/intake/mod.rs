@@ -1,5 +1,7 @@
+pub mod chat_live;
 pub mod fixture;
 pub mod github_intake;
+pub mod jira_live;
 pub mod minutes;
 pub mod model;
 pub mod outlook_com;
@@ -206,7 +208,70 @@ pub fn sync_all(store: &Store, cfg: &Config) -> Vec<SyncResult> {
     if cfg.intake.outlook {
         out.push(run_outlook(store, cfg, None, false));
     }
+    out.extend([run_github(store), run_jira(store), run_teams(store)].into_iter().flatten());
     out
+}
+
+fn counted(name: &str, added: usize) -> SyncResult {
+    SyncResult {
+        name: name.into(),
+        ok: true,
+        candidates_added: added,
+        candidates_skipped: 0,
+        events: 0,
+        error: None,
+    }
+}
+
+fn run_github(store: &Store) -> Option<SyncResult> {
+    if crate::github::token().is_none() {
+        return None;
+    }
+    match crate::github::fetch_assigned() {
+        Ok(items) => github_intake::ingest(store, &items).ok().map(|n| counted("github", n)),
+        Err(e) => Some(SyncResult {
+            name: "github".into(),
+            ok: false,
+            candidates_added: 0,
+            candidates_skipped: 0,
+            events: 0,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+fn run_jira(store: &Store) -> Option<SyncResult> {
+    if crate::jira::creds().is_none() {
+        return None;
+    }
+    match crate::jira::fetch_assigned() {
+        Ok(items) => jira_live::ingest(store, &items).ok().map(|n| counted("jira", n)),
+        Err(e) => Some(SyncResult {
+            name: "jira".into(),
+            ok: false,
+            candidates_added: 0,
+            candidates_skipped: 0,
+            events: 0,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+fn run_teams(store: &Store) -> Option<SyncResult> {
+    if crate::chat::token().is_none() {
+        return None;
+    }
+    match crate::chat::fetch_recent() {
+        Ok(items) => chat_live::ingest(store, &items).ok().map(|n| counted("teams", n)),
+        Err(e) => Some(SyncResult {
+            name: "teams".into(),
+            ok: false,
+            candidates_added: 0,
+            candidates_skipped: 0,
+            events: 0,
+            error: Some(e.to_string()),
+        }),
+    }
 }
 
 pub fn sync_all_json(store: &Store, cfg: &Config) -> Value {
