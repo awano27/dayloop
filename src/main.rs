@@ -595,7 +595,7 @@ fn run() -> Result<i32> {
                     0
                 }
                 Err(_) => {
-                    println!("GitHub に聞けません。GITHUB_TOKEN を置くと Issue と PR を候補にします");
+                    println!("GitHub に聞けません。GITHUB_TOKEN を置くか、gh auth login を済ませてください");
                     0
                 }
             },

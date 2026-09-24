@@ -42,13 +42,13 @@
 | 議事録ファイル | `inbox` の txt、md、html。アクション、フォローアップ、宿題の行だけを候補にする | この PC で確認した |
 | Gmail | ブラウザで受信トレイを開き、最大5通を開いて Jev が残すか捨てるかを決める | 一覧と開封は確認した。広告5通は skip になった |
 | Outlook のウェブ | Gmail と同じ。URL だけ違う | コードはある。この PC では受信トレイまで確認していない |
-| Azure DevOps Boards | `https://dev.azure.com/pcedx/pcedx-1/_workitems/recentlyupdated/` を開き、同じ判断をする | 作業項目 `test` を1件残した。題名にボタン名が混ざる |
+| Azure DevOps Boards | `https://dev.azure.com/pcedx/pcedx-1/_workitems/recentlyupdated/` を開き、同じ判断をする | 作業項目を残せる。保存する題名からは New Work Item や Column Options を外す |
 | Teams のブラウザ | 同じブラウザ読み取り | コードはある。この PC では一覧まで確認していない |
 | クラシック Outlook | COM でメールと予定を読む。本文は既定で読まない | この PC には COM が無い |
 | Teams チャット、Graph のメール | トークンがあるときだけ | この PC ではトークンが無く、読んでいない |
-| GitHub | 自分に割り当てられた Issue と PR。マージ済み PR と closed の Issue は完了 | 鍵が無く、実物は読んでいない |
+| GitHub | 自分に割り当てられた Issue と PR。マージ済み PR と closed の Issue は完了 | `GITHUB_TOKEN` が無くても、`gh auth login` 済みならその資格情報で読む |
 | Jira | 自分に割り当てられた未完了。done なら完了 | 接続情報が無く、実物は読んでいない |
-| DevOps API | 組織名と PAT か `az login` | ブラウザ読み取りとは別。この PC では組織名が無く、API では読んでいない |
+| DevOps API | 組織名と PAT か `az login` | ブラウザ読み取りとは別。この PC の `az` 資格情報では Boards が 401 になり、API では読めない |
 | 今見ている Outlook / Teams | `capture` が前面の窓の文章だけを読む。クリックも入力もしない | 本文が取れなければ「取得失敗」。依頼が無かったことにはしない |
 
 ブラウザ読み取りで Jev に渡してよい操作は「開く」と「終わり」だけである。送信、削除、返信、転送、作成は選択肢に入れない。言語の選択画面は候補にしない。
