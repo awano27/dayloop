@@ -70,6 +70,8 @@ flowchart TD
 
 DevOps のブラウザ URL は `https://dev.azure.com/pcedx/pcedx-1/_workitems/recentlyupdated/` である。API の組織名とは別に持つ。
 
+作業の枝は `graph_nodes.kind = step` である。台帳を開くと、無いものだけ書く。題名だけの画面は取得失敗、それ以外の窓も取得失敗、Boards のツールバーは題名から外す、GitHub は `gh` のログインを使う、DevOps API の 401 は止める、画面の本文は送らない、言語の選択画面は候補にしない。人が `dayloop steps set` で替えると、種まきは上書きしない。同じブラウザの件名は `browse:サイト:件名` の枝になり、2回目は Jev を呼ばない。確度が下限未満の答えは枝にしない。同じ画面の本文は `capture:text:` にハッシュを付けた枝 `reuse` になり、次の取り込みは保存済みの評価を使う。
+
 `dayloop capture` は `intake::link` から呼ばない。読むのは前面の1窓で、プロセスが Outlook か Teams のときだけ本文を取る。それ以外の窓は本文を読まず、取得失敗として残す。空の文章と、ボタン名だけの文章も取得失敗である。依頼が無かった、とは書かない。実行ファイルは `wincli` か `Sbroenne.WindowsMcp.exe` で、後者は `--tools ui_read` だけで起動する。クリック、入力、送信のツールは渡さない。
 
 取れた本文は `screen_captures` に置く。`screen_evals` は設問版 `screen-v1`、モデル名、送ったかどうか、5つの選択、確度、理由コード、原文の引用を1行で持つ。`screen_decisions` は採用、修正、保留を追記する。修正しても評価の行は消さない。候補の `source_ref` は `screen:` に記録の id を付けたもので、画面の要素 id ではない。Jev への送信は `--send` のときだけである。鍵が無い、呼び出しに失敗したときは評価を保留し、本文は手元に残す。

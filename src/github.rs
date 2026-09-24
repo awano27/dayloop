@@ -14,6 +14,10 @@ pub struct Ref {
 }
 
 pub fn token() -> Option<String> {
+    env_token().or_else(gh_cli_token)
+}
+
+fn env_token() -> Option<String> {
     for key in ["GITHUB_TOKEN", "GH_TOKEN"] {
         if let Ok(value) = std::env::var(key) {
             let value = value.trim().to_string();
@@ -22,7 +26,20 @@ pub fn token() -> Option<String> {
             }
         }
     }
-    gh_cli_token()
+    None
+}
+
+/// Follows the `github:credential` edge. `skip` reads nothing. `env` ignores `gh`.
+pub fn credential(store: &crate::store::Store) -> Option<String> {
+    let mode = crate::graph::find_step(store, "github:credential")
+        .ok()
+        .flatten()
+        .map(|edge| edge.to_choice);
+    match mode.as_deref() {
+        Some("skip") => None,
+        Some("env") => env_token(),
+        _ => env_token().or_else(gh_cli_token),
+    }
 }
 
 fn gh_cli_token() -> Option<String> {
@@ -87,8 +104,12 @@ pub fn sight_from_body(kind: &str, body: &str) -> Result<Sight> {
 }
 
 pub fn fetch_sight(source_ref: &str) -> Option<Sight> {
+    fetch_sight_with(source_ref, &token()?)
+}
+
+pub fn fetch_sight_with(source_ref: &str, token: &str) -> Option<Sight> {
     let parsed = parse_ref(source_ref)?;
-    let token = token()?;
+    let token = token.to_string();
     let path = if parsed.kind == "pr" { "pulls" } else { "issues" };
     let url = format!(
         "https://api.github.com/repos/{}/{}/{path}/{}",
@@ -127,9 +148,13 @@ pub fn parse_assigned(body: &str) -> Result<Vec<Item>> {
 
 pub fn fetch_assigned() -> Result<Vec<Item>> {
     let token = token().ok_or_else(|| anyhow!("GITHUB_TOKEN がありません"))?;
+    assigned_with(&token)
+}
+
+pub fn assigned_with(token: &str) -> Result<Vec<Item>> {
     let body = get(
         "https://api.github.com/issues?filter=assigned&state=open&per_page=50",
-        &token,
+        token,
     )?;
     parse_assigned(&body)
 }

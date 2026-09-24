@@ -142,7 +142,14 @@ dayloop capture revise <id> --title "仕様書をレビューする"
 dayloop capture hold <id>
 ```
 
-`accept` は候補にするだけで、今日の予定には入れない。予定にするときは `dayloop candidates accept` を続ける。取得できなかったときは「取得失敗」と出る。読み取りプログラムは `DAYLOOP_WINCLI`、`%LOCALAPPDATA%\dayloop\bin\wincli.exe`、または同じ場所の `Sbroenne.WindowsMcp.exe` である。dayloop は `ui_read` だけを許可して起動する。
+同じ作業はグラフが先に決めます。台帳を開くと、題名だけの画面は取得失敗、Boards のツールバーは外す、GitHub は `gh` のログイン、DevOps API の 401 は止める、画面の本文は送らない、という枝が入ります。同じ件名を次に開いたときは Jev を呼びません。枝を替えるときは次です。
+
+```powershell
+dayloop steps
+dayloop steps set capture:body send
+```
+
+`accept` は候補にするだけで、今日の予定には入れない。予定にするときは `dayloop candidates accept` を続ける。取得できなかったときは「取得失敗」と出る。読み取りプログラムは `DAYLOOP_WINCLI`、`%LOCALAPPDATA%\dayloop\bin\wincli.exe`、または同じ場所の `Sbroenne.WindowsMcp.exe` である。dayloop は `ui_read` と `ui_snapshot` だけを許可して起動する。クリックや入力は渡さない。
 
 ## 証跡で完了にする
 

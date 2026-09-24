@@ -30,6 +30,38 @@ const CANDIDATE_CHOICES: &[&str] = &["today", "backlog", "shelve", "reject", "as
 /// Used when `commit_confidence` is unset and Jev is on.
 pub const DEFAULT_FLOOR: f64 = 0.5;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepDecision {
+    pub choice: Option<String>,
+    pub from_graph: bool,
+}
+
+/// Graph first. Jev only when that step has no edge. A confident allowed answer becomes the next edge.
+pub fn decide_step(
+    store: &Store,
+    key: &str,
+    state: &str,
+    choices: &[&str],
+    decider: &mut dyn Decider,
+    floor: f64,
+) -> Result<StepDecision> {
+    if let Some(choice) = graph::follow_step(store, key)? {
+        if choices.iter().any(|item| *item == choice) {
+            return Ok(StepDecision { choice: Some(choice), from_graph: true });
+        }
+    }
+    let owned: Vec<String> = choices.iter().map(|item| (*item).to_string()).collect();
+    match decider.decide(state, &owned) {
+        JevOutcome::Answer { choice, confidence }
+            if confidence >= floor && choices.iter().any(|item| *item == choice) =>
+        {
+            graph::remember_step(store, key, &choice, Some("jev"))?;
+            Ok(StepDecision { choice: Some(choice), from_graph: false })
+        }
+        _ => Ok(StepDecision { choice: None, from_graph: false }),
+    }
+}
+
 /// Codex の Jev（TypeSafe）と同じ接続先。`route` が空のときの既定。
 pub const TYPESAFE_ROUTE: &str = "https://api.typesafe.ai/v1/systemone";
 

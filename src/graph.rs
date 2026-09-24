@@ -297,6 +297,73 @@ pub fn record_order(store: &Store, first: &str, second: &str) -> Result<()> {
     Ok(())
 }
 
+const WORK_STEPS: &[(&str, &str, &str)] = &[
+    ("capture:title_only", "fail", "title_only"),
+    ("boards:toolbar", "strip", "toolbar"),
+    ("github:credential", "gh", "gh_login"),
+    ("devops:api_denied", "skip", "unauthorized"),
+    ("capture:body", "hold_send", "local_only"),
+    ("capture:other_app", "fail", "not_outlook_or_teams"),
+    ("browse:language", "skip", "language_picker"),
+];
+
+/// The five work decisions already made. A later human or Jev answer replaces one.
+pub fn seed_work_steps(store: &Store) -> Result<()> {
+    for (key, choice, reason) in WORK_STEPS {
+        if find_step(store, key)?.is_none() {
+            remember_step(store, key, choice, Some(reason))?;
+        }
+    }
+    Ok(())
+}
+
+pub fn remember_step(store: &Store, key: &str, choice: &str, reason: Option<&str>) -> Result<()> {
+    let node = node_id(store, "step", key)?;
+    activate(store, &node, choice, reason)?;
+    Ok(())
+}
+
+pub fn find_step(store: &Store, key: &str) -> Result<Option<Learned>> {
+    active_edge(store, "step", key)
+}
+
+/// Use an existing edge and keep a hit. Does not call Jev.
+pub fn follow_step(store: &Store, key: &str) -> Result<Option<String>> {
+    let Some(edge) = find_step(store, key)? else {
+        return Ok(None);
+    };
+    let node = node_id(store, "step", key)?;
+    let hit = ulid::Ulid::new().to_string();
+    store.connection().execute(
+        "INSERT INTO graph_hits(id, node_id, to_choice, reason_code, created_at) VALUES(?1,?2,?3,?4,?5)",
+        params![hit, node, edge.to_choice, edge.reason_code, util::now()],
+    )?;
+    Ok(Some(edge.to_choice))
+}
+
+pub fn list_steps(store: &Store) -> Result<String> {
+    let mut stmt = store.connection().prepare(
+        "SELECT n.key, e.to_choice, e.reason_code
+         FROM graph_nodes n
+         JOIN graph_edges e ON e.node_id = n.id AND e.active = 1
+         WHERE n.kind = 'step'
+         ORDER BY n.key
+         LIMIT 40",
+    )?;
+    let rows: Vec<(String, String, Option<String>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if rows.is_empty() {
+        return Ok("作業の枝はありません".into());
+    }
+    let mut out = String::new();
+    for (key, choice, reason) in rows {
+        let reason = reason.unwrap_or_default();
+        out.push_str(&format!("{key}  {choice}  {reason}\n"));
+    }
+    Ok(out)
+}
+
 pub fn saved_first(store: &Store, a: &str, b: &str) -> Result<Option<String>> {
     let Some(edge) = active_edge(store, "order", &order_node_key(a, b))? else {
         return Ok(None);

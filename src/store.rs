@@ -139,7 +139,9 @@ impl Store {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
-        Ok(Store { conn })
+        let store = Store { conn };
+        crate::graph::seed_work_steps(&store)?;
+        Ok(store)
     }
 
     pub(crate) fn connection(&self) -> &Connection {
