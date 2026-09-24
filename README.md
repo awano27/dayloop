@@ -47,13 +47,39 @@ https://github.com/awano27/dayloop
 
 辿り方は [docs/analysis/05-decision-graph.md](docs/analysis/05-decision-graph.md)。Jev の確度は [docs/jev-eval.md](docs/jev-eval.md)。コマンドの残りと設定は [docs/guide.md](docs/guide.md)。
 
-## 試す
+## 利用開始
 
-```bash
+Windows 10 / 11 で、このリポジトリをビルドする。管理者権限は要らない。台帳は `%LOCALAPPDATA%\dayloop` にできる。
+
+```powershell
 cargo build --release
+.\target\release\dayloop.exe config init
+.\target\release\dayloop.exe doctor
+.\target\release\dayloop.exe where
 ```
 
-`target/release/dayloop.exe` を好きなフォルダに置く。SmartScreen は「詳細情報 → 実行」。昇格は不要。書き込みは `%LOCALAPPDATA%\dayloop` だけ。配布用の zip はまだ無い。
+`config init` は設定ファイルを作る。`doctor` は、Jev の鍵や画面の読み取りが無ければ、その1行を出す。無くても1日のループは動く。SmartScreen が出たら「詳細情報 → 実行」。
+
+最初の1件を入れて、朝、日中、昼、夕の順に回す。
+
+```powershell
+.\target\release\dayloop.exe add "仕様書をレビューする" --due 2026-09-25 --estimate 30
+.\target\release\dayloop.exe plan
+.\target\release\dayloop.exe next
+.\target\release\dayloop.exe check
+.\target\release\dayloop.exe close
+.\target\release\dayloop.exe today
+```
+
+`plan` の最後に「この内容で確定しますか」と出る。`close` は、残ったタスクが完了、未完了、持ち越し、取り下げのどれかになるまで、その日を閉じない。
+
+Jev を使うときは、鍵を環境変数に置く。台帳には書かない。
+
+```powershell
+$env:DAYLOOP_JEV_API_KEY = "typesafe の鍵"
+```
+
+今開いている Outlook か Teams の文章は `.\target\release\dayloop.exe capture` で1回読む。作業の枝は `.\target\release\dayloop.exe steps` で見る。残りのコマンドは [docs/guide.md](docs/guide.md)。
 
 ## 動く範囲
 
@@ -61,7 +87,7 @@ cargo build --release
 |---|---|
 | OS | Windows 10 / 11。管理者権限は不要 |
 | Outlook | クラシック版があるときだけメールと予定を読む。無くてもループは動く |
-| 外に出るもの | ない。パスワードもトークンも持たない |
+| 外に出るもの | Jev を使うときだけ TypeSafe に聞く。鍵は環境変数に置き、台帳には書かない |
 | Outlook への書き込み | しない。本文とメールアドレスは既定で読まない |
 
 判断の記録は [docs/decisions.md](docs/decisions.md)。MCP のつなぎ方は [docs/mcp-clients.md](docs/mcp-clients.md)。
