@@ -104,6 +104,41 @@ pub fn is_language_picker(items: &[PageItem]) -> bool {
         >= 3
 }
 
+pub fn board_subject(store: &Store, label: &str) -> Result<String> {
+    let strip = crate::graph::follow_step(store, "boards:toolbar")?
+        .map(|choice| choice == "strip")
+        .unwrap_or(true);
+    if strip {
+        Ok(work_item_title(label))
+    } else {
+        Ok(subject_line(label))
+    }
+}
+
+pub fn judge_visible(
+    store: &Store,
+    site: &str,
+    subject: &str,
+    evidence: &str,
+    keywords: &[String],
+    decider: &mut dyn Decider,
+    floor: f64,
+) -> Result<(bool, &'static str)> {
+    let key = format!("browse:{site}:{}", step_key(subject));
+    let state = format!("この件を今日の候補にしますか。\n{evidence}");
+    let decision = jev::decide_step(store, &key, &state, &["keep", "skip"], decider, floor)?;
+    if let Some(choice) = decision.choice {
+        let via = if decision.from_graph { "グラフ" } else { "Jev" };
+        return Ok((choice == "keep", via));
+    }
+    let keep = keep_message(&JevOutcome::Unavailable, evidence, keywords);
+    Ok((keep, "キーワード"))
+}
+
+fn step_key(subject: &str) -> String {
+    subject.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect()
+}
+
 pub fn keep_message(outcome: &JevOutcome, text: &str, keywords: &[String]) -> bool {
     match outcome {
         JevOutcome::Answer { choice, confidence }
@@ -144,8 +179,11 @@ pub fn run(store: &Store, site: &str) -> Result<usize> {
         return Ok(0);
     }
     if is_language_picker(&items) {
-        println!("言語の選択画面です。受信トレイが出るまで操作してください。候補には入れていません");
-        return Ok(0);
+        let choice = crate::graph::follow_step(store, "browse:language")?.unwrap_or_else(|| "skip".into());
+        if choice != "keep" {
+            println!("言語の選択画面です。受信トレイが出るまで操作してください。候補には入れていません");
+            return Ok(0);
+        }
     }
     let keywords = crate::config::load().intake.keywords;
     let limit = MAX_OPENS.min(items.len());
@@ -154,7 +192,7 @@ pub fn run(store: &Store, site: &str) -> Result<usize> {
             continue;
         };
         let subject = if site == "boards" {
-            let cleaned = work_item_title(&item.label);
+            let cleaned = board_subject(store, &item.label)?;
             if cleaned.is_empty() {
                 continue;
             }
@@ -166,20 +204,10 @@ pub fn run(store: &Store, site: &str) -> Result<usize> {
         std::thread::sleep(std::time::Duration::from_secs(2));
         let body = page.read_pane().unwrap_or_default();
         let evidence = format!("{subject}\n{body}");
-        let kind = if site == "boards" { "作業項目" } else { "メール" };
-        let outcome = decider.decide(
-            &format!("この{kind}を今日の候補にしますか。\n{evidence}"),
-            &["keep".into(), "skip".into()],
-        );
-        match &outcome {
-            JevOutcome::Answer { choice, confidence } => {
-                println!("開いた: {subject} / Jev: {choice} ({confidence:.2})");
-            }
-            JevOutcome::Unavailable => {
-                println!("開いた: {subject} / Jev は呼べなかったので、キーワードだけで判断します");
-            }
-        }
-        if keep_message(&outcome, &evidence, &keywords) && save_one(store, site, &subject, &body)? {
+        let floor = crate::config::load().jev.commit_confidence.unwrap_or(jev::DEFAULT_FLOOR);
+        let (keep, via) = judge_visible(store, site, &subject, &evidence, &keywords, &mut decider, floor)?;
+        println!("開いた: {subject} / {via}: {}", if keep { "keep" } else { "skip" });
+        if keep && save_one(store, site, &subject, &body)? {
             added += 1;
         }
         opened += 1;

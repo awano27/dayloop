@@ -180,6 +180,11 @@ enum Cmd {
     /// 外部ソースから Candidate / 予定を取り込む
     #[command(subcommand)]
     Intake(IntakeCmd),
+    /// 作業の枝を見る。set で枝を替える
+    Steps {
+        #[command(subcommand)]
+        action: Option<StepAction>,
+    },
     /// 前面の Outlook か Teams に出ている文章を取り込む
     Capture {
         /// この1回だけ本文を Jev に送って評価する。既定では送らない
@@ -238,6 +243,12 @@ enum IntakeCmd {
         #[arg(long, default_value = "mail")]
         site: String,
     },
+}
+
+#[derive(Subcommand)]
+enum StepAction {
+    /// 枝を替える。次からこの選択を使う
+    Set { key: String, choice: String },
 }
 
 #[derive(Subcommand)]
@@ -532,6 +543,14 @@ fn run() -> Result<i32> {
             markdown::export(&store, &d)?;
             0
         }
+        Cmd::Steps { action } => {
+            if let Some(StepAction::Set { key, choice }) = action {
+                dayloop::graph::remember_step(&store, &key, &choice, Some("person"))?;
+                println!("枝を替えました: {key} {choice}");
+            }
+            println!("{}", dayloop::graph::list_steps(&store)?);
+            0
+        }
         Cmd::Capture { send, action } => match action {
             Some(CaptureCmd::Accept { id }) => {
                 println!("{}", screen::accept(&store, &id)?);
@@ -588,15 +607,27 @@ fn run() -> Result<i32> {
                 println!("Teams 候補: {n} 件");
                 0
             }
-            IntakeCmd::Github => match dayloop::github::fetch_assigned() {
-                Ok(items) => {
-                    let n = dayloop::intake::github_intake::ingest(&store, &items)?;
-                    println!("GitHub 候補: {n} 件");
+            IntakeCmd::Github => match dayloop::graph::follow_step(&store, "github:credential")?.as_deref() {
+                Some("skip") => {
+                    println!("GitHub はグラフの枝で読まないことになっています");
                     0
                 }
-                Err(_) => {
-                    println!("GitHub に聞けません。GITHUB_TOKEN を置くか、gh auth login を済ませてください");
-                    0
+                _ => {
+                    let Some(token) = dayloop::github::credential(&store) else {
+                        println!("GitHub に聞けません。GITHUB_TOKEN を置くか、gh auth login を済ませてください");
+                        return Ok(0);
+                    };
+                    match dayloop::github::assigned_with(&token) {
+                        Ok(items) => {
+                            let n = dayloop::intake::github_intake::ingest(&store, &items)?;
+                            println!("GitHub 候補: {n} 件");
+                            0
+                        }
+                        Err(_) => {
+                            println!("GitHub に聞けません。GITHUB_TOKEN を置くか、gh auth login を済ませてください");
+                            0
+                        }
+                    }
                 }
             },
             IntakeCmd::Jira => match dayloop::jira::fetch_assigned() {
@@ -616,8 +647,14 @@ fn run() -> Result<i32> {
                     println!("DevOps 候補: {n} 件");
                     0
                 }
-                Err(_) => {
-                    println!("Azure DevOps に聞けません。AZURE_DEVOPS_ORG と、PAT または az login が必要です");
+                Err(err) => {
+                    let msg = err.to_string();
+                    if msg.contains("401") {
+                        let _ = dayloop::graph::follow_step(&store, "devops:api_denied")?;
+                        println!("Azure DevOps の API は 401 です。グラフの枝に従い、ブラウザの作業項目とは別のまま止めます");
+                    } else {
+                        println!("Azure DevOps に聞けません。AZURE_DEVOPS_ORG と、PAT または az login が必要です");
+                    }
                     0
                 }
             },

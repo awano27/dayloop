@@ -121,7 +121,8 @@ fn with_github(store: &Store, date: &str, map: &BTreeMap<String, Sight>) -> BTre
         if map.contains_key(&key) {
             continue;
         }
-        if let Some(sight) = crate::github::fetch_sight(&key)
+        let github = crate::github::credential(store).and_then(|token| crate::github::fetch_sight_with(&key, &token));
+        if let Some(sight) = github
             .or_else(|| crate::jira::fetch_sight(&key))
             .or_else(|| crate::devops::fetch_sight(&key))
         {

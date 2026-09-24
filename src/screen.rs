@@ -485,14 +485,17 @@ pub fn capture(store: &Store, reader: &mut dyn ScreenReader, send: bool, decider
     }
     let kind = classify(&fg.process_name, &fg.title);
     if kind == AppKind::Other {
-        return save_failure(
-            store,
-            "unknown",
-            &fg.title,
-            &fg.process_name,
-            "none",
-            "前面の窓は Outlook でも Teams でもありません",
-        );
+        let choice = crate::graph::follow_step(store, "capture:other_app")?.unwrap_or_else(|| "fail".into());
+        if choice != "read" {
+            return save_failure(
+                store,
+                "unknown",
+                &fg.title,
+                &fg.process_name,
+                "none",
+                "前面の窓は Outlook でも Teams でもありません",
+            );
+        }
     }
     let read_raw = match reader.read_json(&fg.handle) {
         Ok(s) => s,
@@ -517,14 +520,17 @@ pub fn capture(store: &Store, reader: &mut dyn ScreenReader, send: bool, decider
         return save_failure(store, app_source(&kind), &fg.title, &fg.process_name, &read.method, "本文が空です");
     }
     if text_is_only_title(&text, &fg.title) {
-        return save_failure(
-            store,
-            app_source(&kind),
-            &fg.title,
-            &fg.process_name,
-            &read.method,
-            "本文が取れませんでした",
-        );
+        let choice = crate::graph::follow_step(store, "capture:title_only")?.unwrap_or_else(|| "fail".into());
+        if choice != "keep" {
+            return save_failure(
+                store,
+                app_source(&kind),
+                &fg.title,
+                &fg.process_name,
+                &read.method,
+                "本文が取れませんでした",
+            );
+        }
     }
     let folded = match body_status(&text) {
         BodyStatus::Unusable => {
@@ -539,7 +545,26 @@ pub fn capture(store: &Store, reader: &mut dyn ScreenReader, send: bool, decider
         }
         BodyStatus::Ok { folded } => folded,
     };
-    let eval = judge(&text, folded, send, decider);
+    let step_key = format!("capture:text:{}", text_hash(&text));
+    let known = crate::graph::find_step(store, &step_key)?.map(|edge| edge.to_choice);
+    let (eval, reused) = if known.as_deref() == Some("reuse") {
+        if let Some(prev) = previous_sent_eval(store, &text)? {
+            let _ = crate::graph::follow_step(store, &step_key)?;
+            (prev, true)
+        } else {
+            let eval = judge(&text, folded, send, decider);
+            if eval.sent {
+                crate::graph::remember_step(store, &step_key, "reuse", Some("same_text"))?;
+            }
+            (eval, false)
+        }
+    } else {
+        let eval = judge(&text, folded, send, decider);
+        if eval.sent {
+            crate::graph::remember_step(store, &step_key, "reuse", Some("same_text"))?;
+        }
+        (eval, false)
+    };
     let row = CaptureRow {
         id: ulid::Ulid::new().to_string(),
         app: app_source(&kind).into(),
@@ -553,7 +578,50 @@ pub fn capture(store: &Store, reader: &mut dyn ScreenReader, send: bool, decider
     };
     insert_capture(store, &row)?;
     insert_eval(store, &row.id, &eval)?;
-    Ok(render_ok(&row, &eval))
+    let mut report = render_ok(&row, &eval);
+    if reused {
+        report.push_str("グラフ: 同じ文章なので再判断しません\n");
+    }
+    Ok(report)
+}
+
+fn text_hash(text: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn previous_sent_eval(store: &Store, body: &str) -> Result<Option<EvalRow>> {
+    let row = store.connection().query_row(
+        "SELECT e.kind, e.relation, e.priority, e.link, e.next_action, e.confidence, e.reason_codes, e.quote, e.model_id
+         FROM screen_evals e
+         JOIN screen_captures c ON c.id = e.capture_id
+         WHERE c.body = ?1 AND e.sent = 1
+         ORDER BY e.evaluated_at DESC LIMIT 1",
+        params![body],
+        |r| {
+            Ok(EvalRow {
+                sent: true,
+                kind: r.get(0)?,
+                relation: r.get(1)?,
+                priority: r.get(2)?,
+                link: r.get(3)?,
+                next_action: r.get(4)?,
+                confidence: r.get(5)?,
+                reason_codes: r.get(6)?,
+                quote: r.get(7)?,
+                model_id: r.get(8)?,
+            })
+        },
+    );
+    match row {
+        Ok(eval) => Ok(Some(eval)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn save_failure(store: &Store, app: &str, title: &str, process: &str, method: &str, reason: &str) -> Result<String> {
@@ -1192,6 +1260,10 @@ fn run_wincli(exe: &std::path::Path, args: &[String]) -> std::result::Result<Str
 
 pub fn run_foreground(store: &Store, send: bool) -> Result<String> {
     let mut reader = WincliReader;
+    let send = match crate::graph::follow_step(store, "capture:body")?.as_deref() {
+        Some("send") => true,
+        _ => send,
+    };
     if send {
         if !crate::jev::ready(&crate::config::load().jev.mode, &crate::config::load().jev.route) {
             return capture(store, &mut reader, true, None);
