@@ -47,6 +47,51 @@ pub fn subject_line(label: &str) -> String {
     head.chars().take(80).collect()
 }
 
+const BOARD_CHROME: &[&str] = &[
+    "New Work Item",
+    "Column Options",
+    "Recycle Bin",
+    "Import Work Items",
+    "Create Query",
+    "Open in Queries",
+    "Recently updated",
+    "Back to work items",
+    "新規作業項目",
+    "列のオプション",
+];
+
+/// Boards rows mix the work-item title with toolbar text. Keep the title.
+pub fn work_item_title(label: &str) -> String {
+    let flat = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut text = flat;
+    for phrase in BOARD_CHROME {
+        text = strip_phrase(&text, phrase);
+    }
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = subject_line(&flat);
+    if title.chars().count() < 2 { String::new() } else { title }
+}
+
+fn strip_phrase(text: &str, phrase: &str) -> String {
+    let lower = text.to_lowercase();
+    let needle = phrase.to_lowercase();
+    if lower.len() != text.len() {
+        return text.replace(phrase, " ");
+    }
+    let mut out = String::new();
+    let mut rest = text;
+    let mut lower_rest = lower.as_str();
+    while let Some(pos) = lower_rest.find(&needle) {
+        out.push_str(&rest[..pos]);
+        out.push(' ');
+        let next = pos + needle.len();
+        rest = &rest[next..];
+        lower_rest = &lower_rest[next..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn is_language_picker(items: &[PageItem]) -> bool {
     const NAMES: &[&str] = &[
         "Afrikaans", "Deutsch", "English", "Español", "Français", "Italiano", "日本語",
@@ -108,7 +153,15 @@ pub fn run(store: &Store, site: &str) -> Result<usize> {
         let Some(item) = items.iter().find(|item| item.index == index).cloned() else {
             continue;
         };
-        let subject = subject_line(&item.label);
+        let subject = if site == "boards" {
+            let cleaned = work_item_title(&item.label);
+            if cleaned.is_empty() {
+                continue;
+            }
+            cleaned
+        } else {
+            subject_line(&item.label)
+        };
         page.open(index)?;
         std::thread::sleep(std::time::Duration::from_secs(2));
         let body = page.read_pane().unwrap_or_default();
@@ -140,8 +193,12 @@ pub fn run(store: &Store, site: &str) -> Result<usize> {
 }
 
 fn save_one(store: &Store, site: &str, label: &str, body: &str) -> Result<bool> {
-    let title = label.lines().next().unwrap_or(label).trim();
-    if title.is_empty() || !allowed_label(title) {
+    let title = if site == "boards" {
+        work_item_title(label)
+    } else {
+        label.lines().next().unwrap_or(label).trim().to_string()
+    };
+    if title.is_empty() || !allowed_label(&title) {
         return Ok(false);
     }
     let source = match site {
@@ -150,7 +207,7 @@ fn save_one(store: &Store, site: &str, label: &str, body: &str) -> Result<bool> 
         _ => "mail",
     };
     let source_ref = format!("browse:{site}:{title}");
-    let shown = if body.trim().is_empty() {
+    let shown = if site == "boards" || body.trim().is_empty() {
         title.to_string()
     } else {
         let excerpt: String = body.split_whitespace().take(24).collect::<Vec<_>>().join(" ");
@@ -354,6 +411,8 @@ mod tests {
         ];
         assert!(is_language_picker(&picker));
         assert_eq!(subject_line("田中 見積の確認 - 明日まで"), "田中 見積の確認");
+        assert_eq!(work_item_title("test New Work Item Column Options"), "test");
+        assert!(work_item_title("New Work Item Column Options").is_empty());
         assert!(keep_message(
             &JevOutcome::Answer { choice: "keep".into(), confidence: 0.8 },
             "見積",

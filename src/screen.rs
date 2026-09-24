@@ -171,6 +171,7 @@ pub fn read_command(handle: &str) -> Result<Vec<String>> {
         handle.into(),
         "--language".into(),
         "ja-JP".into(),
+        "--include-children".into(),
     ])
 }
 
@@ -920,7 +921,7 @@ fn is_cli_exe(path: &std::path::Path) -> bool {
 
 /// Arguments for one whole-window read. No element id.
 pub fn mcp_read_arguments(handle: &str) -> serde_json::Value {
-    serde_json::json!({ "windowHandle": handle, "language": "ja-JP" })
+    serde_json::json!({ "windowHandle": handle, "language": "ja-JP", "includeChildren": true })
 }
 
 pub struct WincliReader;
@@ -1004,7 +1005,7 @@ fn mcp_ui_read(exe: &std::path::Path, handle: &str) -> std::result::Result<Strin
     use std::time::Duration;
 
     let mut child = Command::new(exe)
-        .args(["--tools", "ui_read"])
+        .args(["--tools", "ui_read,ui_snapshot"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1062,9 +1063,75 @@ fn mcp_ui_read(exe: &std::path::Path, handle: &str) -> std::result::Result<Strin
         Ok(line) => line,
         Err(message) => return fail(&mut child, message),
     };
+    let window_json = match extract_tool_json(&line) {
+        Ok(json) => json,
+        Err(err) => return fail(&mut child, err.message),
+    };
+    let window_text = parse_read(&window_json).ok().filter(|read| read.ok).map(|read| read.text).unwrap_or_default();
+    let snap = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "ui_snapshot",
+            "arguments": { "windowHandle": handle, "maxDepth": 8, "mode": "full" }
+        }
+    });
+    if writeln!(stdin, "{snap}").is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(window_json);
+    }
+    let _ = stdin.flush();
+    let snap_line = match wait_mcp(&rx, 3, Duration::from_secs(45)) {
+        Ok(line) => line,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(window_json);
+        }
+    };
     let _ = child.kill();
     let _ = child.wait();
-    extract_tool_json(&line)
+    let snap_json = extract_tool_json(&snap_line).unwrap_or_default();
+    let best = longest_visible_text(&snap_json);
+    if best.chars().count() > window_text.chars().count() && matches!(body_status(&best), BodyStatus::Ok { .. }) {
+        return Ok(serde_json::json!({"success": true, "text": best, "hint": "named element"}).to_string());
+    }
+    Ok(window_json)
+}
+
+pub fn longest_visible_text(raw: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_slice(raw)) else {
+        return String::new();
+    };
+    let mut best = String::new();
+    collect_names(&value, &mut best);
+    best
+}
+
+fn collect_names(value: &serde_json::Value, best: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for key in ["name", "n", "text"] {
+                if let Some(text) = map.get(key).and_then(|item| item.as_str()) {
+                    let text = text.trim();
+                    if text.chars().count() > best.chars().count() && matches!(body_status(text), BodyStatus::Ok { .. }) {
+                        *best = text.to_string();
+                    }
+                }
+            }
+            for child in map.values() {
+                collect_names(child, best);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_names(item, best);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn wait_mcp(rx: &std::sync::mpsc::Receiver<std::result::Result<String, String>>, id: i64, budget: std::time::Duration) -> std::result::Result<String, String> {
@@ -1214,7 +1281,10 @@ mod tests {
     #[test]
     fn read_command_is_whole_window_only() {
         let args = read_command("42").unwrap();
-        assert_eq!(args, vec!["ui", "read", "--window", "42", "--language", "ja-JP"]);
+        assert_eq!(
+            args,
+            vec!["ui", "read", "--window", "42", "--language", "ja-JP", "--include-children"]
+        );
         let joined = args.join(" ");
         assert!(!joined.contains("click"));
         assert!(!joined.contains("element"));
@@ -1222,7 +1292,10 @@ mod tests {
         let args = mcp_read_arguments("42");
         assert_eq!(args["windowHandle"], "42");
         assert_eq!(args["language"], "ja-JP");
+        assert_eq!(args["includeChildren"], true);
         assert!(args.get("elementId").is_none());
+        let snap = r#"{"tree":[{"name":"Outlook","type":"Window"},{"name":"9月25日15時までに、LINE連携の仕様書をレビューしてください","type":"Text"}]}"#;
+        assert!(longest_visible_text(snap).contains("LINE連携"));
     }
 
     #[test]

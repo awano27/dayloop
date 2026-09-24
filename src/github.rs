@@ -22,7 +22,28 @@ pub fn token() -> Option<String> {
             }
         }
     }
-    None
+    gh_cli_token()
+}
+
+fn gh_cli_token() -> Option<String> {
+    if cfg!(test) {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let name = exe.file_stem()?.to_string_lossy();
+    if !name.eq_ignore_ascii_case("dayloop") {
+        return None;
+    }
+    let output = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let token = String::from_utf8(output.stdout).ok()?;
+    let token = token.trim().to_string();
+    if token.is_empty() { None } else { Some(token) }
 }
 
 /// `github:pr:owner/repo#12` or `github:issue:owner/repo#12`.
