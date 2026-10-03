@@ -214,3 +214,7 @@ dayloop mcp
 ```
 
 stdio の JSON-RPC。クライアント設定は [mcp-clients.md](mcp-clients.md)。`plan_day`、`check_in`、`close_day` は、質問を返す前に証跡と既知の枝を適用する。`get_today` は読むだけで、台帳を変えない。
+
+## 2026-10-03: 相手待ちと依頼変更
+
+日別タスクとは独立した約束台帳を追加しました。未決着の約束と確認予定は日次終了後も残ります。CLI/MCPの共通入力、変更提案の本人確認、検証手順は [約束台帳ガイド](plans/commitment-tracking/GUIDE.md)、会話用の入力は [プロンプト](plans/commitment-tracking/acceptance-prompt.md) を参照してください。Outlook/Teamsの実機検証とJiraの開発は今回の対象外です。

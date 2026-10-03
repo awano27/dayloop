@@ -16,11 +16,17 @@ pub struct Rank {
 }
 
 pub fn spans_hhmm(pairs: &[(&str, &str)]) -> Vec<(NaiveTime, NaiveTime)> {
-    pairs.iter().filter_map(|(a, b)| facts::span(a, b)).collect()
+    pairs
+        .iter()
+        .filter_map(|(a, b)| facts::span(a, b))
+        .collect()
 }
 
 pub fn spans_from_events(events: &[crate::model::Event]) -> Vec<(NaiveTime, NaiveTime)> {
-    events.iter().filter_map(|e| facts::span(&e.start, &e.end)).collect()
+    events
+        .iter()
+        .filter_map(|e| facts::span(&e.start, &e.end))
+        .collect()
 }
 
 pub fn rank(today: &str, task: &Task, spans: &[(NaiveTime, NaiveTime)]) -> Rank {
@@ -67,7 +73,11 @@ pub fn sort_day(today: &str, mut tasks: Vec<Task>, spans: &[(NaiveTime, NaiveTim
 }
 
 fn open_key(state: State) -> u8 {
-    if state.is_open() { 0 } else { 1 }
+    if state.is_open() {
+        0
+    } else {
+        1
+    }
 }
 
 pub fn first_open_tie<'a>(
@@ -125,7 +135,10 @@ fn apply_saved_first_tie(
 }
 
 pub fn next_open(store: &Store, date: &str) -> Result<Option<Task>> {
-    Ok(day_tasks(store, date)?.into_iter().find(|t| t.state.is_open()))
+    let blocked = crate::commitment::blocked_task_ids(store)?;
+    Ok(day_tasks(store, date)?
+        .into_iter()
+        .find(|t| t.state.is_open() && !blocked.contains(&t.id)))
 }
 
 /// Apply observed completion and known graph edges, then return the first task
@@ -190,9 +203,30 @@ mod tests {
     fn overdue_before_today_before_future() {
         let spans = spans_hhmm(&[("10:00", "11:00")]);
         let tasks = vec![
-            task("c", "未来", Some("2026-09-23"), Some(30), 0, "2026-09-22T01:00:00Z"),
-            task("a", "超過", Some("2026-09-21"), Some(30), 0, "2026-09-22T03:00:00Z"),
-            task("b", "今日", Some("2026-09-22"), Some(30), 0, "2026-09-22T02:00:00Z"),
+            task(
+                "c",
+                "未来",
+                Some("2026-09-23"),
+                Some(30),
+                0,
+                "2026-09-22T01:00:00Z",
+            ),
+            task(
+                "a",
+                "超過",
+                Some("2026-09-21"),
+                Some(30),
+                0,
+                "2026-09-22T03:00:00Z",
+            ),
+            task(
+                "b",
+                "今日",
+                Some("2026-09-22"),
+                Some(30),
+                0,
+                "2026-09-22T02:00:00Z",
+            ),
         ];
         let ids: Vec<_> = sort_open("2026-09-22", tasks, &spans)
             .into_iter()
@@ -204,8 +238,22 @@ mod tests {
     #[test]
     fn higher_carry_wins_inside_the_same_due_class() {
         let tasks = vec![
-            task("new", "新しい", Some("2026-09-21"), Some(30), 0, "2026-09-22T01:00:00Z"),
-            task("old", "古い", Some("2026-09-21"), Some(30), 3, "2026-09-22T02:00:00Z"),
+            task(
+                "new",
+                "新しい",
+                Some("2026-09-21"),
+                Some(30),
+                0,
+                "2026-09-22T01:00:00Z",
+            ),
+            task(
+                "old",
+                "古い",
+                Some("2026-09-21"),
+                Some(30),
+                3,
+                "2026-09-22T02:00:00Z",
+            ),
         ];
         let ids: Vec<_> = sort_open("2026-09-22", tasks, &[])
             .into_iter()
@@ -218,9 +266,30 @@ mod tests {
     fn fits_before_unknown_before_over() {
         let spans = spans_hhmm(&[("09:00", "17:30")]);
         let tasks = vec![
-            task("over", "入らない", Some("2026-09-22"), Some(60), 0, "2026-09-22T01:00:00Z"),
-            task("fit", "入る", Some("2026-09-22"), Some(30), 0, "2026-09-22T02:00:00Z"),
-            task("unk", "見積なし", Some("2026-09-22"), None, 0, "2026-09-22T00:00:00Z"),
+            task(
+                "over",
+                "入らない",
+                Some("2026-09-22"),
+                Some(60),
+                0,
+                "2026-09-22T01:00:00Z",
+            ),
+            task(
+                "fit",
+                "入る",
+                Some("2026-09-22"),
+                Some(30),
+                0,
+                "2026-09-22T02:00:00Z",
+            ),
+            task(
+                "unk",
+                "見積なし",
+                Some("2026-09-22"),
+                None,
+                0,
+                "2026-09-22T00:00:00Z",
+            ),
         ];
         let ids: Vec<_> = sort_open("2026-09-22", tasks, &spans)
             .into_iter()
@@ -232,8 +301,22 @@ mod tests {
     #[test]
     fn equal_rank_keeps_created_at_then_id() {
         let tasks = vec![
-            task("b", "同着", Some("2026-09-22"), Some(30), 0, "2026-09-22T02:00:00Z"),
-            task("a", "同着", Some("2026-09-22"), Some(30), 0, "2026-09-22T02:00:00Z"),
+            task(
+                "b",
+                "同着",
+                Some("2026-09-22"),
+                Some(30),
+                0,
+                "2026-09-22T02:00:00Z",
+            ),
+            task(
+                "a",
+                "同着",
+                Some("2026-09-22"),
+                Some(30),
+                0,
+                "2026-09-22T02:00:00Z",
+            ),
         ];
         let ids: Vec<_> = sort_open("2026-09-22", tasks, &[])
             .into_iter()

@@ -107,7 +107,8 @@ fn confirm_plan_rejects_while_yesterday_is_open() {
     store
         .add_task("昨日", None, None, "manual", None, Some("2026-09-02"))
         .unwrap();
-    assert!(store.confirm_plan("2026-09-03").is_err());
+    let revision = store.plan_revision("2026-09-03").unwrap();
+    assert!(store.confirm_plan("2026-09-03", Some(&revision)).is_err());
     let view = engine::plan_view(&store, "2026-09-03").unwrap();
     let kinds: Vec<&str> = view["questions"]
         .as_array()
@@ -120,7 +121,8 @@ fn confirm_plan_rejects_while_yesterday_is_open() {
     let t = &store.open_tasks_for_day("2026-09-02").unwrap()[0];
     store.transition(&t.id, State::Done, None, None).unwrap();
     store.close_day("2026-09-02").unwrap().unwrap();
-    store.confirm_plan("2026-09-03").unwrap();
+    let revision = store.plan_revision("2026-09-03").unwrap();
+    store.confirm_plan("2026-09-03", Some(&revision)).unwrap();
     let view = engine::plan_view(&store, "2026-09-03").unwrap();
     let kinds: Vec<&str> = view["questions"]
         .as_array()

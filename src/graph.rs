@@ -419,9 +419,11 @@ fn apply_task_choice(store: &Store, t: &Task, edge: &Learned) -> Result<bool> {
 }
 
 pub fn apply_known_tasks(store: &Store, date: &str) -> Result<usize> {
+    let protected = crate::commitment::protected_task_ids(store)?;
     let ids: Vec<String> = store
         .open_tasks_for_day(date)?
         .into_iter()
+        .filter(|task| !protected.contains(&task.id))
         .map(|t| t.id)
         .collect();
     let mut n = 0;

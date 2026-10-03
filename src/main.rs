@@ -7,11 +7,11 @@ use dayloop::graph;
 use dayloop::jev;
 use dayloop::jev::Decider;
 use dayloop::jev_eval;
-use dayloop::order;
 use dayloop::markdown;
 use dayloop::mcp;
 use dayloop::model;
 use dayloop::model::State;
+use dayloop::order;
 use dayloop::paths;
 use dayloop::rituals::{self, Outcome, Ui};
 use dayloop::screen;
@@ -37,6 +37,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// 約束台帳。JSONをCLI/MCP共通処理へ渡す（本文の外部送信なし）
+    Commitment {
+        #[arg(value_parser = ["register", "list", "ingest", "apply", "check", "history", "sync"])]
+        action: String,
+        /// 入力JSON（--file とどちらか一方）
+        #[arg(long, conflicts_with = "file")]
+        json: Option<String>,
+        /// UTF-8 JSONファイル
+        #[arg(long, conflicts_with = "json")]
+        file: Option<std::path::PathBuf>,
+    },
     /// 今日の状態を表示
     Today {
         #[arg(long)]
@@ -48,10 +59,7 @@ enum Cmd {
         date: Option<String>,
     },
     /// 同順位の2件について、先にやるタイトルを覚える
-    Prefer {
-        first: String,
-        second: String,
-    },
+    Prefer { first: String, second: String },
     /// タスクを追加（既定は今日の予定）
     Add {
         title: String,
@@ -212,21 +220,13 @@ enum IntakeCmd {
         dry_run: bool,
     },
     /// フィクスチャ JSON を同じパイプラインに流す
-    Fixture {
-        dir: std::path::PathBuf,
-    },
+    Fixture { dir: std::path::PathBuf },
     /// 決定 / TODO / アクション の行を会議候補にする
-    Note {
-        file: std::path::PathBuf,
-    },
+    Note { file: std::path::PathBuf },
     /// チケットのフィクスチャを候補にする
-    Tickets {
-        file: std::path::PathBuf,
-    },
+    Tickets { file: std::path::PathBuf },
     /// Teams のフィクスチャを候補にする
-    Teams {
-        file: std::path::PathBuf,
-    },
+    Teams { file: std::path::PathBuf },
     /// 自分に割り当てられた GitHub の Issue と PR を候補にする
     Github,
     /// 自分に割り当てられた Jira を候補にする
@@ -352,6 +352,21 @@ fn run() -> Result<i32> {
     let ui = Ui::new(cli.yes);
 
     let code = match cli.cmd {
+        Cmd::Commitment { action, json, file } => {
+            let text = match (json, file) {
+                (Some(text), _) => text,
+                (_, Some(path)) => std::fs::read_to_string(path)?,
+                _ => "{}".to_string(),
+            };
+            let args: serde_json::Value = serde_json::from_str(&text)?;
+            let result = dayloop::tools::dispatch(&store, &format!("commitment_{action}"), &args);
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            if result.get("error").is_some() {
+                1
+            } else {
+                0
+            }
+        }
         Cmd::Today { date } => {
             let d = resolve_date(date.as_deref())?;
             rituals::print_day(&store, &d)?;
@@ -375,13 +390,35 @@ fn run() -> Result<i32> {
             println!("覚えました: 「{first}」を「{second}」より先");
             0
         }
-        Cmd::Add { title, due, estimate, date, backlog } => {
+        Cmd::Add {
+            title,
+            due,
+            estimate,
+            date,
+            backlog,
+        } => {
             if let Some(d) = &due {
                 parse_date(d)?;
             }
-            let plan = if backlog { None } else { Some(resolve_date(date.as_deref())?) };
-            let t = store.add_task(&title, due.as_deref(), estimate, "manual", None, plan.as_deref())?;
-            println!("追加: {}  {}  [{}]", short(&t.id), t.title, t.state.label_ja());
+            let plan = if backlog {
+                None
+            } else {
+                Some(resolve_date(date.as_deref())?)
+            };
+            let t = store.add_task(
+                &title,
+                due.as_deref(),
+                estimate,
+                "manual",
+                None,
+                plan.as_deref(),
+            )?;
+            println!(
+                "追加: {}  {}  [{}]",
+                short(&t.id),
+                t.title,
+                t.state.label_ja()
+            );
             if let Some(d) = plan {
                 markdown::export(&store, &d)?;
             }
@@ -422,7 +459,12 @@ fn run() -> Result<i32> {
             export_for(&store, &t)?;
             0
         }
-        Cmd::Carry { id, reason, to, reschedule } => {
+        Cmd::Carry {
+            id,
+            reason,
+            to,
+            reschedule,
+        } => {
             let old = store.get_task(&id)?;
             let base = old.plan_date.clone().unwrap_or_else(util::today);
             let to = match to {
@@ -436,7 +478,12 @@ fn run() -> Result<i32> {
                 parse_date(r)?;
             }
             let t = store.carry_over(&old.id, &reason, &to, reschedule.as_deref())?;
-            println!("持ち越し: {}  {}  -> {to}（{}回目）", short(&t.id), t.title, t.carried_count);
+            println!(
+                "持ち越し: {}  {}  -> {to}（{}回目）",
+                short(&t.id),
+                t.title,
+                t.carried_count
+            );
             export_for(&store, &old)?;
             export_for(&store, &t)?;
             0
@@ -468,7 +515,12 @@ fn run() -> Result<i32> {
                 anyhow::bail!("選択肢が不正です: {other}");
             }
         },
-        Cmd::Split { id, reason, into, to } => {
+        Cmd::Split {
+            id,
+            reason,
+            into,
+            to,
+        } => {
             let old = store.get_task(&id)?;
             let base = old.plan_date.clone().unwrap_or_else(util::today);
             let to = match to {
@@ -489,8 +541,11 @@ fn run() -> Result<i32> {
         }
         Cmd::Close { date } => {
             let d = resolve_date(date.as_deref())?;
+            let already_closed = store.get_day(&d)?.and_then(|day| day.closed_at).is_some();
             let o = rituals::close_ritual(&store, &ui, &d)?;
-            markdown::export(&store, &d)?;
+            if !already_closed {
+                markdown::export(&store, &d)?;
+            }
             finish(o)
         }
         Cmd::Retro { date } => {
@@ -505,12 +560,25 @@ fn run() -> Result<i32> {
                 }
                 for c in cands {
                     let age = util::days_since(&c.created_at);
-                    let stale = if age >= store::CANDIDATE_STALE_DAYS { "  !! 放置" } else { "" };
-                    println!("{}  {}  ({}、{age}日前){stale}", short(&c.id), c.title, c.source);
+                    let stale = if age >= store::CANDIDATE_STALE_DAYS {
+                        "  !! 放置"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "{}  {}  ({}、{age}日前){stale}",
+                        short(&c.id),
+                        c.title,
+                        c.source
+                    );
                 }
                 0
             }
-            CandCmd::Add { title, source, source_ref } => {
+            CandCmd::Add {
+                title,
+                source,
+                source_ref,
+            } => {
                 match store.add_candidate(&title, &source, source_ref.as_deref())? {
                     Some(c) => println!("候補追加: {}  {}", short(&c.id), c.title),
                     None => println!("同じ参照が既に存在するか却下済みのため追加しません"),
@@ -518,9 +586,18 @@ fn run() -> Result<i32> {
                 0
             }
             CandCmd::Accept { id, backlog, date } => {
-                let plan = if backlog { None } else { Some(resolve_date(date.as_deref())?) };
+                let plan = if backlog {
+                    None
+                } else {
+                    Some(resolve_date(date.as_deref())?)
+                };
                 let t = store.accept_candidate(&id, plan.as_deref())?;
-                println!("採用: {}  {}  [{}]", short(&t.id), t.title, t.state.label_ja());
+                println!(
+                    "採用: {}  {}  [{}]",
+                    short(&t.id),
+                    t.title,
+                    t.state.label_ja()
+                );
                 export_for(&store, &t)?;
                 0
             }
@@ -607,29 +684,31 @@ fn run() -> Result<i32> {
                 println!("Teams 候補: {n} 件");
                 0
             }
-            IntakeCmd::Github => match dayloop::graph::follow_step(&store, "github:credential")?.as_deref() {
-                Some("skip") => {
-                    println!("GitHub はグラフの枝で読まないことになっています");
-                    0
-                }
-                _ => {
-                    let Some(token) = dayloop::github::credential(&store) else {
-                        println!("GitHub に聞けません。GITHUB_TOKEN を置くか、gh auth login を済ませてください");
-                        return Ok(0);
-                    };
-                    match dayloop::github::assigned_with(&token) {
-                        Ok(items) => {
-                            let n = dayloop::intake::github_intake::ingest(&store, &items)?;
-                            println!("GitHub 候補: {n} 件");
-                            0
-                        }
-                        Err(_) => {
+            IntakeCmd::Github => {
+                match dayloop::graph::follow_step(&store, "github:credential")?.as_deref() {
+                    Some("skip") => {
+                        println!("GitHub はグラフの枝で読まないことになっています");
+                        0
+                    }
+                    _ => {
+                        let Some(token) = dayloop::github::credential(&store) else {
                             println!("GitHub に聞けません。GITHUB_TOKEN を置くか、gh auth login を済ませてください");
-                            0
+                            return Ok(0);
+                        };
+                        match dayloop::github::assigned_with(&token) {
+                            Ok(items) => {
+                                let n = dayloop::intake::github_intake::ingest(&store, &items)?;
+                                println!("GitHub 候補: {n} 件");
+                                0
+                            }
+                            Err(_) => {
+                                println!("GitHub に聞けません。GITHUB_TOKEN を置くか、gh auth login を済ませてください");
+                                0
+                            }
                         }
                     }
                 }
-            },
+            }
             IntakeCmd::Jira => match dayloop::jira::fetch_assigned() {
                 Ok(items) => {
                     let n = dayloop::intake::jira_live::ingest(&store, &items)?;
@@ -665,7 +744,10 @@ fn run() -> Result<i32> {
             }
             IntakeCmd::Sync => {
                 let results = dayloop::intake::link(&store);
-                if results.iter().all(|r| r.ok && r.candidates_added == 0 && r.events == 0) {
+                if results
+                    .iter()
+                    .all(|r| r.ok && r.candidates_added == 0 && r.events == 0)
+                {
                     println!("新しい候補はありません");
                 }
                 0

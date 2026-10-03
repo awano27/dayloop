@@ -134,7 +134,7 @@ impl Question {
         }
     }
 
-    pub fn confirm_plan(date: &str, n: usize) -> Self {
+    pub fn confirm_plan(date: &str, n: usize, plan_revision: &str) -> Self {
         Self {
             kind: "confirm_plan".into(),
             target_id: date.to_string(),
@@ -142,7 +142,12 @@ impl Question {
             question: format!("{date} の予定 {n} 件をこの内容で確定しますか"),
             default: 0,
             options: vec![
-                choice("確定する", Some("confirm_plan"), json!({ "date": date }), &[]),
+                choice(
+                    "確定する",
+                    Some("confirm_plan"),
+                    json!({ "date": date, "plan_revision": plan_revision }),
+                    &[],
+                ),
                 choice("まだ", None, json!({}), &[]),
             ],
         }
@@ -208,17 +213,25 @@ pub fn today_view(store: &Store, date: &str) -> Result<Value> {
     let cands = store.open_candidates()?;
     let unclosed = store.unclosed_days_before(date)?;
     let events = store.events_for_day(date)?;
-    Ok(json!({
-        "date": date,
-        "day": day,
-        "tasks": tasks,
-        "events": events,
-        "open_candidate_count": cands.len(),
-        "unclosed_days": unclosed,
-    }))
+    with_commitments(
+        store,
+        date,
+        json!({
+            "date": date,
+            "day": day,
+            "tasks": tasks,
+            "events": events,
+            "open_candidate_count": cands.len(),
+            "unclosed_days": unclosed,
+        }),
+    )
 }
 
 pub fn plan_view(store: &Store, date: &str) -> Result<Value> {
+    store.read_snapshot(|| plan_view_in_snapshot(store, date))
+}
+
+fn plan_view_in_snapshot(store: &Store, date: &str) -> Result<Value> {
     let unclosed = store.unclosed_days_before(date)?;
     let mut unclosed_out = Vec::new();
     let mut questions = Vec::new();
@@ -241,52 +254,105 @@ pub fn plan_view(store: &Store, date: &str) -> Result<Value> {
     }
 
     let backlog = store.backlog()?;
+    let blocked = crate::commitment::blocked_task_ids(store)?;
     for t in &backlog {
+        if blocked.contains(&t.id) { continue; }
         questions.push(Question::backlog(t, date));
     }
 
     let planned = crate::order::day_tasks(store, date)?;
     let n_open = store.open_tasks_for_day(date)?.len();
-    if !earlier_open {
-        questions.push(Question::confirm_plan(date, n_open));
-    }
-
     let events = store.events_for_day(date)?;
-    Ok(json!({
-        "date": date,
-        "unclosed_days": unclosed_out,
-        "candidates": cands.iter().map(candidate_json).collect::<Vec<_>>(),
-        "backlog": backlog,
-        "planned": planned,
-        "events": events,
-        "questions": questions,
-        "order_tie": order_tie_json(store, date)?,
-    }))
+    let mut view = with_commitments(
+        store,
+        date,
+        json!({
+            "date": date,
+            "unclosed_days": unclosed_out,
+            "candidates": cands.iter().map(candidate_json).collect::<Vec<_>>(),
+            "backlog": backlog,
+            "planned": planned,
+            "events": events,
+            "questions": questions,
+            "order_tie": order_tie_json(store, date)?,
+        }),
+    )?;
+    let revision = store.plan_revision(date)?;
+    view["plan_revision"] = json!(revision);
+    if !earlier_open {
+        view["questions"].as_array_mut().expect("questions array")
+            .push(serde_json::to_value(Question::confirm_plan(date, n_open, &revision))?);
+    }
+    Ok(view)
 }
 
 pub fn check_view(store: &Store, date: &str) -> Result<Value> {
     let open = open_in_order(store, date)?;
-    let doing: Vec<&Task> = open.iter().filter(|t| t.state == State::InProgress).collect();
+    let doing: Vec<&Task> = open
+        .iter()
+        .filter(|t| t.state == State::InProgress)
+        .collect();
     let untouched: Vec<&Task> = open.iter().filter(|t| t.state == State::Planned).collect();
-    let questions: Vec<Question> = untouched.iter().map(|t| Question::check_task(t)).collect();
-    Ok(json!({
-        "date": date,
-        "in_progress": doing,
-        "untouched": untouched,
-        "questions": questions,
-        "order_tie": order_tie_json(store, date)?,
-    }))
+    let blocked = crate::commitment::blocked_task_ids(store)?;
+    let questions: Vec<Question> = untouched.iter().filter(|task| !blocked.contains(&task.id)).map(|t| Question::check_task(t)).collect();
+    with_commitments(
+        store,
+        date,
+        json!({
+            "date": date,
+            "in_progress": doing,
+            "untouched": untouched,
+            "questions": questions,
+            "order_tie": order_tie_json(store, date)?,
+        }),
+    )
 }
 
 pub fn close_view(store: &Store, date: &str) -> Result<Value> {
-    let open = open_in_order(store, date)?;
-    let questions: Vec<Question> = open.iter().map(Question::close_task).collect();
-    Ok(json!({
-        "closed": false,
-        "open": open,
-        "questions": questions,
-        "order_tie": order_tie_json(store, date)?,
-    }))
+    let status = store.day_close_status(date)?;
+    close_status_view(store, date, &status)
+}
+
+pub fn close_status_view(store: &Store, date: &str, status: &crate::store::DayCloseStatus) -> Result<Value> {
+    let mut questions = status.open.iter().map(|task| serde_json::to_value(Question::close_task(task)))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    questions.extend(status.commitment_questions.clone());
+    commitment_metadata(
+        store, &status.evaluated_at,
+        json!({
+            "date": date,
+            "closed": status.closed,
+            "already_closed": status.already_closed,
+            "closed_at": status.closed_at,
+            "pending_count": status.pending_count(),
+            "evaluated_at": status.evaluated_at,
+            "open": status.open,
+            "questions": questions,
+            "order_tie": order_tie_json(store, date)?,
+        }),
+    )
+}
+
+/// Promise questions use live revisions, never learned title-based graph decisions.
+fn with_commitments(store: &Store, date: &str, mut view: Value) -> Result<Value> {
+    let at = crate::commitment::day_cutoff(date)?;
+    let pending = crate::commitment::due_questions(store, &at)?;
+    if view.get("questions").is_none() {
+        view["questions"] = json!([]);
+    }
+    view["questions"]
+        .as_array_mut()
+        .expect("questions array")
+        .extend(pending);
+    commitment_metadata(store, &at, view)
+}
+
+fn commitment_metadata(store: &Store, at: &str, mut view: Value) -> Result<Value> {
+    let ledger = crate::commitment::dispatch(store, "commitment_list", &json!({"at":at}))?;
+    view["commitments"] = ledger["commitments"].clone();
+    view["source_sync"] = ledger["sync"].clone();
+    view["blocked_task_ids"] = json!(crate::commitment::blocked_task_ids(store)?);
+    Ok(view)
 }
 
 pub fn retro_view(store: &Store, date: &str) -> Result<Value> {
@@ -299,14 +365,21 @@ pub fn retro_view(store: &Store, date: &str) -> Result<Value> {
     let dropped = count(State::Dropped);
     let open = tasks.iter().filter(|t| t.state.is_open()).count();
     let decided = done + not_done + carried + dropped;
-    let done_rate_pct = if decided > 0 { Some(done * 100 / decided) } else { None };
+    let done_rate_pct = if decided > 0 {
+        Some(done * 100 / decided)
+    } else {
+        None
+    };
 
     let mut by_day = Vec::new();
     let mut d = crate::util::parse_date(&from)?;
     let end = crate::util::parse_date(&to)?;
     while d <= end {
         let ds = d.format("%Y-%m-%d").to_string();
-        let day: Vec<&Task> = tasks.iter().filter(|t| t.plan_date.as_deref() == Some(&ds)).collect();
+        let day: Vec<&Task> = tasks
+            .iter()
+            .filter(|t| t.plan_date.as_deref() == Some(&ds))
+            .collect();
         if !day.is_empty() {
             let c = |s: State| day.iter().filter(|t| t.state == s).count();
             by_day.push(json!({

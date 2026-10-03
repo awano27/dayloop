@@ -29,3 +29,4 @@ pub mod startup;
 pub mod store;
 pub mod tools;
 pub mod util;
+pub mod commitment;

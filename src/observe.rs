@@ -48,7 +48,9 @@ pub fn load_map(cfg: &crate::config::ObserveConfig) -> Result<BTreeMap<String, S
 
 pub fn apply(store: &Store, date: &str, map: &BTreeMap<String, Sight>) -> Result<usize> {
     let mut n = 0;
+    let protected = crate::commitment::protected_task_ids(store)?;
     for t in store.open_tasks_for_day(date)? {
+        if protected.contains(&t.id) { continue; }
         if lookup(map, t.source_ref.as_deref()) != Some(Sight::Closed) {
             continue;
         }
@@ -94,7 +96,9 @@ pub fn apply_day(
     let map = with_github(store, date, map);
     let mut n = apply(store, date, &map)?;
     let events = store.events_for_day(date)?;
+    let protected = crate::commitment::protected_task_ids(store)?;
     for t in store.open_tasks_for_day(date)? {
+        if protected.contains(&t.id) { continue; }
         let Some(source_ref) = t.source_ref.as_deref() else {
             continue;
         };

@@ -19,7 +19,9 @@ pub struct Ui {
 impl Ui {
     pub fn new(yes: bool) -> Ui {
         // DAYLOOP_INTERACTIVE=1 forces prompts even when stdin is piped (tests, wrappers).
-        let forced = std::env::var("DAYLOOP_INTERACTIVE").map(|v| v == "1").unwrap_or(false);
+        let forced = std::env::var("DAYLOOP_INTERACTIVE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         Ui {
             interactive: !yes && (forced || io::stdin().is_terminal()),
         }
@@ -30,7 +32,12 @@ impl Ui {
         println!();
         println!("? {q}");
         for (i, o) in opts.iter().enumerate() {
-            println!("  {}) {}{}", i + 1, o, if i == 0 { "  (Enter で既定)" } else { "" });
+            println!(
+                "  {}) {}{}",
+                i + 1,
+                o,
+                if i == 0 { "  (Enter で既定)" } else { "" }
+            );
         }
         if !self.interactive {
             println!("  -> 対話できないため未回答のまま残します");
@@ -99,6 +106,62 @@ pub enum Outcome {
     Pending(usize),
 }
 
+/// Common ledger commands are the same as MCP; only human input differs.
+fn commitment_ritual(store: &Store, ui: &Ui, date: &str) -> Result<usize> {
+    let questions = crate::commitment::due_questions(store, &crate::commitment::day_cutoff(date)?)?;
+    for question in questions {
+        let options = question["options"].as_array().expect("ledger options");
+        let labels: Vec<&str> = options
+            .iter()
+            .map(|option| option["label"].as_str().unwrap_or("確認"))
+            .collect();
+        let Some(index) = ui.choose(
+            question["question"].as_str().unwrap_or("約束を確認"),
+            &labels,
+        ) else {
+            continue;
+        };
+        let option = &options[index];
+        let Some(tool) = option["tool"].as_str() else {
+            continue;
+        };
+        let mut args = option["args"].clone();
+        let mut answered = true;
+        for need in option["needs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str())
+        {
+            if need == "confirmed" {
+                answered &= ui.choose(
+                    "この状態変更を確定しますか",
+                    &["まだ確定しない", "確定する"],
+                ) == Some(1);
+                args[need] = serde_json::json!(answered);
+            } else {
+                match ui.text(&format!("{need} を入力（日時は RFC3339、IDは完全ID）")) {
+                    Some(value) if need == "expected_revision" => match value.parse::<i64>() {
+                        Ok(revision) => args[need] = serde_json::json!(revision),
+                        Err(_) => {
+                            println!("版番号は整数です。再表示して確認してください");
+                            answered = false;
+                        }
+                    },
+                    Some(value) => args[need] = serde_json::json!(value),
+                    None => answered = false,
+                }
+            }
+        }
+        if !answered {
+            continue;
+        }
+        let result = crate::tools::dispatch(store, tool, &args);
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    }
+    crate::commitment::due_count(store, &crate::commitment::day_cutoff(date)?)
+}
+
 fn meta(t: &Task) -> String {
     let mut m = Vec::new();
     if let Some(d) = &t.due {
@@ -125,9 +188,22 @@ pub fn print_day(store: &Store, date: &str) -> Result<()> {
     let tasks = crate::order::day_tasks(store, date)?;
     let open = tasks.iter().filter(|t| t.state.is_open()).count();
     println!("== {date}");
+    let ledger = crate::commitment::dispatch(store, "commitment_list", &serde_json::json!({}))?;
+    for promise in ledger["commitments"].as_array().into_iter().flatten() {
+        if matches!(promise["status"].as_str(), Some("settled" | "cancelled")) {
+            continue;
+        }
+        println!(
+            "   約束 {} / {} / 次回確認 {} / {}",
+            promise["id"], promise["status"], promise["next_check"], promise["request"]
+        );
+    }
     match &day {
         Some(d) if d.closed_at.is_some() => {
-            println!("   クローズ済み {}", hhmm(d.closed_at.as_deref().unwrap_or("")))
+            println!(
+                "   クローズ済み {}",
+                hhmm(d.closed_at.as_deref().unwrap_or(""))
+            )
         }
         Some(d) if d.plan_confirmed_at.is_some() => println!(
             "   計画確定 {} / 未確定 {open} 件",
@@ -139,7 +215,11 @@ pub fn print_day(store: &Store, date: &str) -> Result<()> {
     if !events.is_empty() {
         println!("   [今日の予定]");
         for e in &events {
-            let loc = e.location.as_deref().map(|l| format!("  {l}")).unwrap_or_default();
+            let loc = e
+                .location
+                .as_deref()
+                .map(|l| format!("  {l}"))
+                .unwrap_or_default();
             println!(
                 "     {}-{}  {}{}",
                 hhmm(&e.start),
@@ -176,7 +256,14 @@ pub fn print_day(store: &Store, date: &str) -> Result<()> {
                 .as_ref()
                 .map(|r| format!("  理由: {r}"))
                 .unwrap_or_default();
-            println!("     {}  {}{}{}{}", short(&t.id), t.title, meta(t), overdue, reason);
+            println!(
+                "     {}  {}{}{}{}",
+                short(&t.id),
+                t.title,
+                meta(t),
+                overdue,
+                reason
+            );
         }
     }
     let cands = store.open_candidates()?;
@@ -188,7 +275,11 @@ pub fn print_day(store: &Store, date: &str) -> Result<()> {
         println!(
             "   候補 {} 件が採用/却下待ち{}",
             cands.len(),
-            if stale > 0 { format!("（うち {stale} 件が {CANDIDATE_STALE_DAYS} 日以上放置）") } else { String::new() }
+            if stale > 0 {
+                format!("（うち {stale} 件が {CANDIDATE_STALE_DAYS} 日以上放置）")
+            } else {
+                String::new()
+            }
         );
     }
     let unclosed = store.unclosed_days_before(date)?;
@@ -202,10 +293,15 @@ pub fn print_day(store: &Store, date: &str) -> Result<()> {
 fn carry_flow(store: &Store, ui: &Ui, t: &Task, date: &str) -> Result<bool> {
     let to = next_workday(date)?;
     if t.carried_count >= MAX_CARRY {
-        println!("  「{}」は既に {} 回持ち越されています。", t.title, t.carried_count);
+        println!(
+            "  「{}」は既に {} 回持ち越されています。",
+            t.title, t.carried_count
+        );
         return resolve_blocked(store, ui, t, &to);
     }
-    let Some(reason) = ui.text("持ち越す理由") else { return Ok(false) };
+    let Some(reason) = ui.text("持ち越す理由") else {
+        return Ok(false);
+    };
     match store.carry_over(&t.id, &reason, &to, None) {
         Ok(n) => {
             println!("  -> {to} に持ち越し（{}回目）", n.carried_count);
@@ -224,7 +320,10 @@ fn resolve_blocked(store: &Store, ui: &Ui, t: &Task, to: &str) -> Result<bool> {
         Some(0) => {
             let mut titles = Vec::new();
             loop {
-                let Some(s) = ui.line(&format!("分割後のタスク {}（空行で終了）", titles.len() + 1)) else {
+                let Some(s) = ui.line(&format!(
+                    "分割後のタスク {}（空行で終了）",
+                    titles.len() + 1
+                )) else {
                     return Ok(false);
                 };
                 if s.is_empty() {
@@ -241,20 +340,26 @@ fn resolve_blocked(store: &Store, ui: &Ui, t: &Task, to: &str) -> Result<bool> {
             Ok(true)
         }
         Some(1) => {
-            let Some(r) = ui.text("取り下げる理由") else { return Ok(false) };
+            let Some(r) = ui.text("取り下げる理由") else {
+                return Ok(false);
+            };
             store.transition(&t.id, State::Dropped, Some(&r), None)?;
             println!("  -> 取り下げ");
             Ok(true)
         }
         Some(2) => {
             let due = loop {
-                let Some(d) = ui.text("新しい期限 (YYYY-MM-DD)") else { return Ok(false) };
+                let Some(d) = ui.text("新しい期限 (YYYY-MM-DD)") else {
+                    return Ok(false);
+                };
                 if parse_date(&d).is_ok() {
                     break d;
                 }
                 println!("  日付の形式が違います");
             };
-            let Some(r) = ui.text("持ち越す理由") else { return Ok(false) };
+            let Some(r) = ui.text("持ち越す理由") else {
+                return Ok(false);
+            };
             store.carry_over(&t.id, &r, to, Some(&due))?;
             println!("  -> 期限を {due} にして {to} に持ち越し（回数はリセット）");
             Ok(true)
@@ -292,11 +397,19 @@ fn print_jev_hints(store: &Store, date: &str) {
     };
     let spans = crate::order::spans_from_events(&store.events_for_day(date).unwrap_or_default());
     if let Some((a, b)) = crate::order::first_open_tie(date, &tasks, &spans) {
-        if crate::graph::saved_first(store, &a.title, &b.title).ok().flatten().is_some() {
+        if crate::graph::saved_first(store, &a.title, &b.title)
+            .ok()
+            .flatten()
+            .is_some()
+        {
             return;
         }
         if let Some(choice) = crate::order::tie_hint(&mut decider, &a.title, &b.title) {
-            let other = if choice == a.title { &b.title } else { &a.title };
+            let other = if choice == a.title {
+                &b.title
+            } else {
+                &a.title
+            };
             println!("  順番のヒント: 「{choice}」を先に。覚えるには prefer {choice} {other}");
         }
     }
@@ -326,58 +439,57 @@ pub fn close_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
         .filter(|t| t.state.is_open())
         .collect::<Vec<_>>();
     println!("== {date} のクローズ: 未確定 {} 件", open.len());
-    let mut pending = 0usize;
+    commitment_ritual(store, ui, date)?;
     for t in open {
         let q = Question::close_task(&t);
         let labels = option_labels(&q);
         match ui.choose(&q.question, &labels) {
-            None => pending += 1,
+            None => {},
             Some(0) => {
                 store.transition(&t.id, State::Done, None, None)?;
                 println!("  -> 完了");
             }
-            Some(1) => match ui.text("未完了の理由") {
-                Some(r) => {
+            Some(1) => {
+                if let Some(r) = ui.text("未完了の理由") {
                     store.transition(&t.id, State::NotDone, Some(&r), None)?;
                     println!("  -> 未完了");
                 }
-                None => pending += 1,
             },
             Some(2) => {
-                if !carry_flow(store, ui, &t, date)? {
-                    pending += 1;
-                }
+                carry_flow(store, ui, &t, date)?;
             }
-            Some(_) => match ui.text("取り下げる理由") {
-                Some(r) => {
+            Some(_) => {
+                if let Some(r) = ui.text("取り下げる理由") {
                     store.transition(&t.id, State::Dropped, Some(&r), None)?;
                     println!("  -> 取り下げ");
                 }
-                None => pending += 1,
             },
         }
     }
-    if pending > 0 {
-        println!();
-        println!("未確定 {pending} 件。全件確定するまで {date} は閉じられません。");
-        return Ok(Outcome::Pending(pending));
-    }
-    match store.close_day(date)? {
-        Ok(()) => {
-            println!();
-            println!("{date} を閉じました。");
-            print_day(store, date)?;
-            Ok(Outcome::Done)
+    let status = store.close_day_status(date)?;
+    let pending = status.pending_count();
+    println!();
+    if status.already_closed {
+        println!("{date} はクローズ済みです。元の終了日時は維持します。");
+        if pending > 0 {
+            println!("閉じた後の未回答確認 {pending} 件。回答後に close を再実行してください。");
         }
-        Err(rest) => Ok(Outcome::Pending(rest.len())),
+    } else if status.closed {
+        println!("{date} を閉じました。");
+        print_day(store, date)?;
+    } else {
+        println!("未確定 {pending} 件。全件確定するまで {date} は閉じられません。");
     }
+    Ok(if pending > 0 { Outcome::Pending(pending) } else { Outcome::Done })
 }
 
 /// Morning: close leftovers first, triage candidates, pull backlog, confirm today's plan.
 pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     crate::intake::link(store);
     for d in store.unclosed_days_before(date)? {
-        if store.open_tasks_for_day(&d)?.is_empty() {
+        if store.open_tasks_for_day(&d)?.is_empty()
+            && crate::commitment::due_count(store, &crate::commitment::day_cutoff(&d)?)? == 0
+        {
             let _ = store.close_day(&d)?;
             continue;
         }
@@ -393,7 +505,7 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     graph::apply_known_tasks(store, date)?;
     crate::jev::grow_if_configured(store, date)?;
 
-    let mut pending = 0usize;
+    let mut pending = commitment_ritual(store, ui, date)?;
 
     let mut cands = store.open_candidates()?;
     cands.sort_by_key(|c| std::cmp::Reverse(days_since(&c.created_at) >= CANDIDATE_STALE_DAYS));
@@ -422,11 +534,13 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     }
 
     let backlog = store.backlog()?;
+    let blocked = crate::commitment::blocked_task_ids(store)?;
     if !backlog.is_empty() {
         println!();
         println!("== 未計画 {} 件", backlog.len());
     }
     for t in backlog {
+        if blocked.contains(&t.id) { continue; }
         let q = Question::backlog(&t, date);
         let labels = option_labels(&q);
         if let Some(0) = ui.choose(&q.question, &labels) {
@@ -436,18 +550,26 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     }
 
     println!();
-    print_day(store, date)?;
+    let (revision, n) = store.read_snapshot(|| {
+        print_day(store, date)?;
+        Ok((store.plan_revision(date)?, store.open_tasks_for_day(date)?.len()))
+    })?;
     if pending > 0 {
         println!();
         println!("未回答 {pending} 件。回答後に plan を再実行してください。");
         return Ok(Outcome::Pending(pending));
     }
-    let n = store.open_tasks_for_day(date)?.len();
-    let q = Question::confirm_plan(date, n);
+    let q = Question::confirm_plan(date, n, &revision);
     let labels = option_labels(&q);
     match ui.choose(&q.question, &labels) {
         Some(0) => {
-            store.confirm_plan(date)?;
+            if let Err(error) = store.confirm_plan(date, Some(&revision)) {
+                if let Some(blocked) = error.downcast_ref::<crate::store::PlanConfirmationBlocked>() {
+                    println!("{}", blocked.message);
+                    return Ok(Outcome::Pending(blocked.pending_count));
+                }
+                return Err(error);
+            }
             println!("確定しました。");
             Ok(Outcome::Done)
         }
@@ -465,14 +587,23 @@ pub fn check_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
         .into_iter()
         .filter(|t| t.state.is_open())
         .collect::<Vec<_>>();
-    let doing: Vec<&Task> = open.iter().filter(|t| t.state == State::InProgress).collect();
+    let doing: Vec<&Task> = open
+        .iter()
+        .filter(|t| t.state == State::InProgress)
+        .collect();
     let untouched: Vec<&Task> = open.iter().filter(|t| t.state == State::Planned).collect();
-    println!("== {date} の途中確認: 未着手 {} 件 / 進行中 {} 件", untouched.len(), doing.len());
+    println!(
+        "== {date} の途中確認: 未着手 {} 件 / 進行中 {} 件",
+        untouched.len(),
+        doing.len()
+    );
     for t in &doing {
         println!("   進行中  {}  {}{}", short(&t.id), t.title, meta(t));
     }
-    let mut pending = 0usize;
+    let mut pending = commitment_ritual(store, ui, date)?;
+    let blocked = crate::commitment::blocked_task_ids(store)?;
     for t in untouched {
+        if blocked.contains(&t.id) { continue; }
         let q = Question::check_task(t);
         let labels = option_labels(&q);
         match ui.choose(&q.question, &labels) {
@@ -516,7 +647,10 @@ pub fn retro_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     println!("== 振り返り {from} 〜 {to}");
     println!("   予定 {}  完了 {done}  未完了 {not_done}  持ち越し {carried}  取り下げ {dropped}  未確定 {open}", tasks.len());
     if decided > 0 {
-        println!("   完了率 {}%（確定した {decided} 件のうち）", done * 100 / decided);
+        println!(
+            "   完了率 {}%（確定した {decided} 件のうち）",
+            done * 100 / decided
+        );
     }
     println!();
     println!("   日付         予定  完了  未完了  持越  取下");
@@ -524,7 +658,10 @@ pub fn retro_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     let end = parse_date(&to)?;
     while d <= end {
         let ds = d.format("%Y-%m-%d").to_string();
-        let day: Vec<&Task> = tasks.iter().filter(|t| t.plan_date.as_deref() == Some(&ds)).collect();
+        let day: Vec<&Task> = tasks
+            .iter()
+            .filter(|t| t.plan_date.as_deref() == Some(&ds))
+            .collect();
         if !day.is_empty() {
             let c = |s: State| day.iter().filter(|t| t.state == s).count();
             println!(
@@ -545,7 +682,12 @@ pub fn retro_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
         println!();
         println!("   持ち越しが多いタスク:");
         for t in repeat.iter().take(5) {
-            println!("     {}回  {}  [{}]", t.carried_count, t.title, t.state.label_ja());
+            println!(
+                "     {}回  {}  [{}]",
+                t.carried_count,
+                t.title,
+                t.state.label_ja()
+            );
         }
     }
 
@@ -553,7 +695,10 @@ pub fn retro_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
     let blocked = store.blocked_carry_tasks()?;
     if !blocked.is_empty() {
         println!();
-        println!("== {MAX_CARRY} 回以上持ち越したタスク {} 件。方針を決めてください。", blocked.len());
+        println!(
+            "== {MAX_CARRY} 回以上持ち越したタスク {} 件。方針を決めてください。",
+            blocked.len()
+        );
     }
     for t in blocked {
         println!();

@@ -66,6 +66,16 @@ CREATE TABLE IF NOT EXISTS events (
   synced_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_date ON events(date);
+CREATE TRIGGER IF NOT EXISTS prevent_open_task_on_closed_day_insert
+BEFORE INSERT ON tasks
+WHEN NEW.plan_date IS NOT NULL AND NEW.state IN ('planned','in_progress')
+ AND EXISTS (SELECT 1 FROM days WHERE date=NEW.plan_date AND closed_at IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'day is closed'); END;
+CREATE TRIGGER IF NOT EXISTS prevent_open_task_on_closed_day_update
+BEFORE UPDATE OF plan_date,state ON tasks
+WHEN NEW.plan_date IS NOT NULL AND NEW.state IN ('planned','in_progress')
+ AND EXISTS (SELECT 1 FROM days WHERE date=NEW.plan_date AND closed_at IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'day is closed'); END;
 "#;
 
 const TASK_COLS: &str = "id,title,source,source_ref,due,estimate_min,plan_date,state,state_reason,carried_count,evidence,created_at,closed_at,carried_from,proposed_state,proposed_reason_code,proposal_confidence,state_note,decided_by";
@@ -127,18 +137,62 @@ fn new_id() -> String {
     ulid::Ulid::new().to_string()
 }
 
+fn ensure_date_open(conn: &Connection, date: &str) -> Result<()> {
+    let closed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM days WHERE date=?1 AND closed_at IS NOT NULL)",
+        params![date],
+        |r| r.get(0),
+    )?;
+    if closed {
+        bail!("{date} はクローズ済みです。未完了の作業は追加できません");
+    }
+    Ok(())
+}
+
 pub struct Store {
     conn: Connection,
 }
+
+/// Historical closure and current unanswered items are independent facts.
+pub struct DayCloseStatus {
+    pub closed: bool,
+    pub already_closed: bool,
+    pub closed_at: Option<String>,
+    pub open: Vec<Task>,
+    pub commitment_questions: Vec<serde_json::Value>,
+    pub evaluated_at: String,
+}
+
+impl DayCloseStatus {
+    pub fn pending_count(&self) -> usize {
+        self.open.len() + self.commitment_questions.len()
+    }
+}
+
+#[derive(Debug)]
+pub struct PlanConfirmationBlocked {
+    pub message: String,
+    pub pending_count: usize,
+}
+
+impl fmt::Display for PlanConfirmationBlocked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PlanConfirmationBlocked {}
 
 impl Store {
     pub fn open() -> Result<Store> {
         std::fs::create_dir_all(paths::data_dir())?;
         std::fs::create_dir_all(paths::days_dir())?;
         let conn = Connection::open(paths::db_path())?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
+        crate::commitment::migrate(&conn)?;
         let store = Store { conn };
         crate::graph::seed_work_steps(&store)?;
         Ok(store)
@@ -146,6 +200,26 @@ impl Store {
 
     pub(crate) fn connection(&self) -> &Connection {
         &self.conn
+    }
+
+    fn transaction<T>(&self, behavior: rusqlite::TransactionBehavior, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, behavior)?;
+        match f() {
+            Ok(value) => {
+                tx.commit()?;
+                Ok(value)
+            }
+            Err(error) => {
+                tx.rollback()?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Keep displayed content and its revision in the same SQLite snapshot;
+    /// release the read transaction before waiting for a person's answer.
+    pub(crate) fn read_snapshot<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.transaction(rusqlite::TransactionBehavior::Deferred, f)
     }
 
     fn query_tasks(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<Task>> {
@@ -182,33 +256,94 @@ impl Store {
             .optional()?)
     }
 
-    /// Invariant 5: today's plan cannot be confirmed while an earlier day still has open tasks.
-    pub fn confirm_plan(&self, date: &str) -> Result<()> {
-        for d in self.unclosed_days_before(date)? {
-            if !self.open_tasks_for_day(&d)?.is_empty() {
-                bail!("{d} が未確定です。先にその日を閉じてください");
-            }
-        }
-        self.ensure_day(date)?;
-        self.conn.execute(
-            "UPDATE days SET plan_confirmed_at=?2 WHERE date=?1",
-            params![date, now()],
-        )?;
-        Ok(())
+    /// Content revision, not a security credential. Hash the full snapshot with
+    /// fixed FNV-1a 128-bit constants so it is stable across process restarts.
+    pub fn plan_revision(&self, date: &str) -> Result<String> {
+        crate::util::parse_date(date)?;
+        let tasks = self.query_tasks(&format!("SELECT {TASK_COLS} FROM tasks ORDER BY id"), &[])?;
+        let mut candidates = self.open_candidates()?;
+        candidates.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut events = self.events_for_day(date)?;
+        events.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
+        let mut statement = self.conn.prepare("SELECT date,closed_at FROM days WHERE closed_at IS NOT NULL ORDER BY date")?;
+        let closed_days = statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let state = serde_json::json!({"date":date,"tasks":tasks,"candidates":candidates,"events":events,
+            "closed_days":closed_days,"ordered_plan":crate::order::day_tasks(self,date)?,
+            "commitments":crate::commitment::plan_state(self)?});
+        let encoded = format!("dayloop-plan-v1\0{state}");
+        let hash = encoded.bytes().fold(0x6c62272e07bb014262b821756295c58du128,
+            |hash, byte| (hash ^ u128::from(byte)).wrapping_mul(0x0000000001000000000000000000013b));
+        Ok(format!("v1:{hash:032x}"))
     }
 
-    /// Invariant 1: a day closes only when no planned/in_progress task remains.
+    /// Invariant 5 plus live commitment/proposal and displayed-content guards.
+    /// The writer lock covers validation and the timestamp write together.
+    pub fn confirm_plan(&self, date: &str, expected_revision: Option<&str>) -> Result<()> {
+        crate::util::parse_date(date)?;
+        self.transaction(rusqlite::TransactionBehavior::Immediate, || {
+            ensure_date_open(&self.conn, date)?;
+            for d in self.unclosed_days_before(date)? {
+                let open = self.open_tasks_for_day(&d)?;
+                if !open.is_empty() {
+                    bail!(PlanConfirmationBlocked { message:format!("{d} が未確定です。先にその日を閉じてください"),pending_count:open.len() });
+                }
+            }
+            let cutoff = crate::commitment::day_cutoff(date)?;
+            let pending = crate::commitment::due_count(self, &cutoff)?;
+            if pending > 0 {
+                bail!(PlanConfirmationBlocked { message:format!("未回答の約束・変更確認が {pending} 件あります。回答後に計画を再表示してください"),pending_count:pending });
+            }
+            let revision = self.plan_revision(date)?;
+            if expected_revision != Some(revision.as_str()) {
+                bail!(PlanConfirmationBlocked { message:"予定の内容が変わったか、表示時の plan_revision がありません。計画を再表示してから確定してください".into(),pending_count:1 });
+            }
+            self.ensure_day(date)?;
+            self.conn.execute("UPDATE days SET plan_confirmed_at=?2 WHERE date=?1", params![date, now()])?;
+            Ok(())
+        })
+    }
+
+    fn close_state(&self, date: &str) -> Result<DayCloseStatus> {
+        let evaluated_at = crate::commitment::day_cutoff(date)?;
+        let closed_at = self.get_day(date)?.and_then(|day| day.closed_at);
+        Ok(DayCloseStatus {
+            closed:closed_at.is_some(), already_closed:closed_at.is_some(), closed_at,
+            open:crate::order::day_tasks(self,date)?.into_iter().filter(|task| task.state.is_open()).collect(),
+            commitment_questions:crate::commitment::due_questions(self, &evaluated_at)?, evaluated_at,
+        })
+    }
+
+    pub fn day_close_status(&self, date: &str) -> Result<DayCloseStatus> {
+        self.read_snapshot(|| self.close_state(date))
+    }
+
+    /// Shared CLI/MCP closure decision. Later confirmations never change a
+    /// historical closed_at, and they remain visible even when closed=true.
+    pub fn close_day_status(&self, date: &str) -> Result<DayCloseStatus> {
+        self.transaction(rusqlite::TransactionBehavior::Immediate, || {
+            let mut status = self.close_state(date)?;
+            if !status.closed && status.pending_count() == 0 {
+                self.ensure_day(date)?;
+                let closed_at = now();
+                self.conn.execute("UPDATE days SET closed_at=?2 WHERE date=?1 AND closed_at IS NULL",params![date,closed_at])?;
+                status.closed = true;
+                status.closed_at = Some(closed_at);
+            }
+            Ok(status)
+        })
+    }
+
+    /// Compatibility for internal callers interested only in historical closure.
+    /// Rituals and MCP use close_day_status to also expose current confirmations.
     pub fn close_day(&self, date: &str) -> Result<std::result::Result<(), Vec<Task>>> {
-        let open = self.open_tasks_for_day(date)?;
-        if !open.is_empty() {
-            return Ok(Err(open));
+        let status = self.close_day_status(date)?;
+        if status.closed {
+            Ok(Ok(()))
+        } else if !status.open.is_empty() {
+            Ok(Err(status.open))
+        } else {
+            bail!("未確認の約束があります。確認事項を確認してから日を閉じてください");
         }
-        self.ensure_day(date)?;
-        self.conn.execute(
-            "UPDATE days SET closed_at=?2 WHERE date=?1",
-            params![date, now()],
-        )?;
-        Ok(Ok(()))
     }
 
     pub fn set_retro(&self, date: &str, note: &str) -> Result<()> {
@@ -312,15 +447,62 @@ impl Store {
         } else {
             State::Backlog
         };
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(d) = plan_date {
+            tx.execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![d])?;
+            ensure_date_open(&tx, d)?;
+        }
+        tx.execute(
             "INSERT INTO tasks(id,title,source,source_ref,due,estimate_min,plan_date,state,created_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![id, title, source, source_ref, due, estimate_min, plan_date, state.as_str(), now()],
         )?;
-        if let Some(d) = plan_date {
-            self.ensure_day(d)?;
-        }
+        tx.commit()?;
         self.get_task(&id)
+    }
+
+    /// Apply a Markdown edit atomically after validating every referenced row.
+    pub fn apply_markdown_import(&self, date: &str, completed_ids: &[String], additions: &[String]) -> Result<(usize, usize)> {
+        if additions.iter().any(|title| title.trim().is_empty()) {
+            bail!("Markdown の新規タスクに空のタイトルがあります");
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        // Acquire SQLite's writer lock before validating, so close_day cannot race the import.
+        tx.execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![date])?;
+        ensure_date_open(&tx, date)?;
+
+        let mut completed = Vec::new();
+        for id in completed_ids {
+            let task = self.get_task(id)?;
+            if task.plan_date.as_deref() != Some(date) {
+                bail!("Markdown のタスク {} は {date} のタスクではありません", task.id);
+            }
+            if !task.state.is_open() { continue; }
+            if !completed.iter().any(|existing: &Task| existing.id == task.id) {
+                completed.push(task);
+            }
+        }
+        for task in &completed {
+            let changed = tx.execute(
+                "UPDATE tasks SET state='done', closed_at=?2, evidence='markdown'
+                 WHERE id=?1 AND state IN ('planned','in_progress') AND plan_date=?3",
+                params![task.id, now(), date],
+            )?;
+            if changed != 1 { bail!("タスクが同時に変更されました。再読み込みしてください"); }
+        }
+        for title in additions {
+            let id = new_id();
+            tx.execute(
+                "INSERT INTO tasks(id,title,source,plan_date,state,created_at)
+                 VALUES(?1,?2,'manual',?3,'planned',?4)",
+                params![id, title.trim(), date, now()],
+            )?;
+        }
+        for task in &completed {
+            crate::graph::record(self, &crate::graph::Situation::from_task(task, "close"), "done", None)?;
+        }
+        tx.commit()?;
+        Ok((completed.len(), additions.len()))
     }
 
     /// Move a backlog (or planned) task onto a date.
@@ -329,16 +511,25 @@ impl Store {
         if t.state.is_terminal() {
             bail!("「{}」は既に {} です", t.title, t.state.label_ja());
         }
+        if t.plan_date.as_deref().is_some_and(|from| from != date)
+            && matches!(t.state, State::Planned | State::InProgress)
+        {
+            bail!("日付をまたぐ移動には理由と履歴が必要です。carry_over を使ってください");
+        }
         let state = if t.state == State::InProgress {
             State::InProgress
         } else {
             State::Planned
         };
-        self.conn.execute(
-            "UPDATE tasks SET plan_date=?2, state=?3 WHERE id=?1",
-            params![t.id, date, state.as_str()],
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![date])?;
+        ensure_date_open(&tx, date)?;
+        let changed = tx.execute(
+            "UPDATE tasks SET plan_date=?2, state=?3 WHERE id=?1 AND state=?4 AND plan_date IS ?5",
+            params![t.id, date, state.as_str(), t.state.as_str(), t.plan_date],
         )?;
-        self.ensure_day(date)?;
+        if changed != 1 { bail!("タスクが同時に変更されました。再読み込みしてください"); }
+        tx.commit()?;
         self.get_task(&t.id)
     }
 
@@ -452,10 +643,14 @@ impl Store {
         }
         let new_id = new_id();
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "UPDATE tasks SET state='carried', state_reason=?2, closed_at=?3 WHERE id=?1",
-            params![t.id, ledger, now()],
+        tx.execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![to_date])?;
+        ensure_date_open(&tx, to_date)?;
+        let changed = tx.execute(
+            "UPDATE tasks SET state='carried', state_reason=?2, closed_at=?3
+             WHERE id=?1 AND state=?4 AND carried_count=?5",
+            params![t.id, ledger, now(), t.state.as_str(), t.carried_count],
         )?;
+        if changed != 1 { bail!("タスクが同時に変更されました。再読み込みしてください"); }
         tx.execute(
             "INSERT INTO tasks(id,title,source,source_ref,due,estimate_min,plan_date,state,carried_count,created_at,carried_from)
              VALUES(?1,?2,?3,?4,?5,?6,?7,'planned',?8,?9,?10)",
@@ -472,7 +667,6 @@ impl Store {
                 t.id
             ],
         )?;
-        tx.execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![to_date])?;
         tx.commit()?;
         if learn {
             crate::graph::record(
@@ -570,11 +764,18 @@ impl Store {
         if titles.len() < 2 {
             bail!("分割先は 2 つ以上指定してください");
         }
+        if reason.trim().is_empty() {
+            bail!("分割理由を指定してください");
+        }
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "UPDATE tasks SET state='dropped', state_reason=?2, closed_at=?3 WHERE id=?1",
-            params![t.id, format!("分割: {}", reason.trim()), now()],
+        tx.execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![to_date])?;
+        ensure_date_open(&tx, to_date)?;
+        let changed = tx.execute(
+            "UPDATE tasks SET state='dropped', state_reason=?2, closed_at=?3
+             WHERE id=?1 AND state=?4 AND plan_date IS ?5",
+            params![t.id, format!("分割: {}", reason.trim()), now(), t.state.as_str(), t.plan_date],
         )?;
+        if changed != 1 { bail!("タスクが同時に変更されました。再読み込みしてください"); }
         let mut ids = Vec::new();
         for title in titles {
             let nid = new_id();
@@ -585,7 +786,6 @@ impl Store {
             )?;
             ids.push(nid);
         }
-        tx.execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![to_date])?;
         tx.commit()?;
         ids.iter().map(|i| self.get_task(i)).collect()
     }
@@ -659,11 +859,25 @@ impl Store {
         if c.status != "open" {
             bail!("候補「{}」は既に {} です", c.title, c.status);
         }
-        let t = self.add_task(&c.title, None, None, &c.source, c.source_ref.as_deref(), plan_date)?;
-        self.conn.execute(
-            "UPDATE candidates SET status='accepted', task_id=?2 WHERE id=?1",
-            params![c.id, t.id],
+        let task_id = new_id();
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(date) = plan_date {
+            tx.execute("INSERT OR IGNORE INTO days(date) VALUES(?1)", params![date])?;
+            ensure_date_open(&tx, date)?;
+        }
+        let changed = tx.execute(
+            "UPDATE candidates SET status='accepted', task_id=?2 WHERE id=?1 AND status='open'",
+            params![c.id, task_id],
         )?;
+        if changed != 1 { bail!("候補が同時に変更されました。再読み込みしてください"); }
+        let state = if plan_date.is_some() { State::Planned } else { State::Backlog };
+        tx.execute(
+            "INSERT INTO tasks(id,title,source,source_ref,plan_date,state,created_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![task_id, c.title, c.source, c.source_ref, plan_date, state.as_str(), now()],
+        )?;
+        tx.commit()?;
+        let t = self.get_task(&task_id)?;
         if learn {
             let choice = if plan_date.is_some() { "today" } else { "backlog" };
             let anchor = plan_date

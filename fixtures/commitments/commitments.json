@@ -1,0 +1,14 @@
+[
+  {
+    "source": "fixture",
+    "external_id": "review-request-20261005-A",
+    "kind": "new_request",
+    "occurred_at": "2026-10-05T09:00:00+09:00",
+    "request": "設計レビューを依頼",
+    "counterparty": "サンプル担当A",
+    "reply_due": "2026-10-07T15:00:00+09:00",
+    "next_check": "2026-10-07T15:00:00+09:00",
+    "source_ref": "fixture://sample/project-A/review-request",
+    "evidence": "合成データ: 月曜に依頼、水曜15時に返答予定"
+  }
+]

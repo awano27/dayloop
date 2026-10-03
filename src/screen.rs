@@ -403,6 +403,17 @@ fn held(quote: Option<String>, codes: Vec<&str>) -> EvalRow {
     }
 }
 
+fn held_after_send_attempt(quote: Option<String>, codes: Vec<&str>) -> EvalRow {
+    let mut eval = held(quote, codes);
+    eval.sent = true;
+    eval.model_id = MODEL_SENT.into();
+    eval
+}
+
+fn reusable_sent_eval(eval: &EvalRow) -> bool {
+    eval.sent && !eval.reason_codes.split(',').any(|code| code == "jev_unavailable")
+}
+
 fn judge(body: &str, folded: bool, send: bool, decider: Option<&mut dyn Decider>) -> EvalRow {
     let quote = deadline_quote(body);
     let mut codes: Vec<&str> = Vec::new();
@@ -446,7 +457,7 @@ fn judge(body: &str, folded: bool, send: bool, decider: Option<&mut dyn Decider>
             }
             JevOutcome::Unavailable => {
                 codes.push("jev_unavailable");
-                return held(quote, codes);
+                return held_after_send_attempt(quote, codes);
             }
         }
     }
@@ -547,20 +558,32 @@ pub fn capture(store: &Store, reader: &mut dyn ScreenReader, send: bool, decider
     };
     let step_key = format!("capture:text:{}", text_hash(&text));
     let known = crate::graph::find_step(store, &step_key)?.map(|edge| edge.to_choice);
-    let (eval, reused) = if known.as_deref() == Some("reuse") {
+    // A local-only capture must describe this invocation, even if the same text
+    // has a prior sent evaluation. Keep the saved evaluation for its own capture.
+    let (eval, reused) = if !send {
+        (judge(&text, folded, false, None), false)
+    } else if known.as_deref() == Some("reuse") {
         if let Some(prev) = previous_sent_eval(store, &text)? {
             let _ = crate::graph::follow_step(store, &step_key)?;
-            (prev, true)
+            let mut reused_eval = prev;
+            reused_eval.sent = false;
+            if !reused_eval.reason_codes.split(',').any(|code| code == "reused_prior_sent_eval") {
+                if !reused_eval.reason_codes.is_empty() {
+                    reused_eval.reason_codes.push(',');
+                }
+                reused_eval.reason_codes.push_str("reused_prior_sent_eval");
+            }
+            (reused_eval, true)
         } else {
             let eval = judge(&text, folded, send, decider);
-            if eval.sent {
+            if reusable_sent_eval(&eval) {
                 crate::graph::remember_step(store, &step_key, "reuse", Some("same_text"))?;
             }
             (eval, false)
         }
     } else {
         let eval = judge(&text, folded, send, decider);
-        if eval.sent {
+        if reusable_sent_eval(&eval) {
             crate::graph::remember_step(store, &step_key, "reuse", Some("same_text"))?;
         }
         (eval, false)
@@ -600,6 +623,7 @@ fn previous_sent_eval(store: &Store, body: &str) -> Result<Option<EvalRow>> {
          FROM screen_evals e
          JOIN screen_captures c ON c.id = e.capture_id
          WHERE c.body = ?1 AND e.sent = 1
+           AND instr(',' || COALESCE(e.reason_codes, '') || ',', ',jev_unavailable,') = 0
          ORDER BY e.evaluated_at DESC LIMIT 1",
         params![body],
         |r| {
@@ -672,8 +696,17 @@ fn render_ok(row: &CaptureRow, eval: &EvalRow) -> String {
 }
 
 fn render_eval(eval: &EvalRow) -> String {
-    if !eval.sent {
-        let mut s = if eval.reason_codes.split(',').any(|c| c == "jev_unavailable") {
+    let reused_prior_sent_eval = eval.reason_codes.split(',').any(|code| code == "reused_prior_sent_eval");
+    let jev_unavailable = eval.reason_codes.split(',').any(|code| code == "jev_unavailable");
+    if eval.sent && jev_unavailable {
+        let mut s = "評価は保留。本文を含む送信を試みましたが、Jev から応答を確認できず、到達したかは未確認です。本文は手元に残しています。\n".to_string();
+        if let Some(q) = &eval.quote {
+            s.push_str(&format!("根拠: {q}\n"));
+        }
+        return s;
+    }
+    if !eval.sent && !reused_prior_sent_eval {
+        let mut s = if jev_unavailable {
             "評価は保留。Jev に繋がりませんでした。本文は手元に残しています。\n".to_string()
         } else {
             "評価は保留。本文は送っていません。送るときは dayloop capture --send\n".to_string()
@@ -684,6 +717,9 @@ fn render_eval(eval: &EvalRow) -> String {
         return s;
     }
     let mut s = String::new();
+    if reused_prior_sent_eval {
+        s.push_str("以前の送信評価を再利用しました。この実行では本文を送っていません。\n");
+    }
     s.push_str(&format!("内容の種類: {}\n", ja_kind(eval.kind.as_deref().unwrap_or("unknown"))));
     s.push_str(&format!("自分との関係: {}\n", ja_relation(eval.relation.as_deref().unwrap_or("needs_check"))));
     s.push_str(&format!("対応の優先度: {}\n", ja_priority(eval.priority.as_deref().unwrap_or("insufficient"))));
@@ -751,8 +787,9 @@ fn ja_reason(c: &str) -> String {
         "unclear" => "判断不能".into(),
         "folded" => "折りたたみの続きは未取得".into(),
         "unlisted" => "選択肢の外".into(),
-        "jev_unavailable" => "Jevに繋がらない".into(),
+        "jev_unavailable" => "Jev応答未確認".into(),
         "not_sent" => "未送信".into(),
+        "reused_prior_sent_eval" => "以前の送信評価を再利用".into(),
         other => other.into(),
     }
 }
@@ -1258,25 +1295,25 @@ fn run_wincli(exe: &std::path::Path, args: &[String]) -> std::result::Result<Str
     Err(ReadFail { message: clip(msg, 200) })
 }
 
-pub fn run_foreground(store: &Store, send: bool) -> Result<String> {
-    let mut reader = WincliReader;
-    let send = match crate::graph::follow_step(store, "capture:body")?.as_deref() {
-        Some("send") => true,
-        _ => send,
-    };
+fn run_capture(store: &Store, reader: &mut dyn ScreenReader, send: bool) -> Result<String> {
     if send {
         if !crate::jev::ready(&crate::config::load().jev.mode, &crate::config::load().jev.route) {
-            return capture(store, &mut reader, true, None);
+            return capture(store, reader, true, None);
         }
         let cfg = crate::config::load();
         let mut decider = crate::jev::HttpDecider {
             route: crate::jev::route_of(&cfg.jev.route),
             timeout_ms: cfg.jev.timeout_ms,
         };
-        capture(store, &mut reader, true, Some(&mut decider))
+        capture(store, reader, true, Some(&mut decider))
     } else {
-        capture(store, &mut reader, false, None)
+        capture(store, reader, false, None)
     }
+}
+
+pub fn run_foreground(store: &Store, send: bool) -> Result<String> {
+    let mut reader = WincliReader;
+    run_capture(store, &mut reader, send)
 }
 
 #[cfg(test)]
@@ -1433,6 +1470,60 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_after_a_send_attempt_is_recorded_and_retried() {
+        let (g, store) = temp_store();
+        let body = "仕様書をレビューしてください";
+        let mut reader = Fixed { fg: fg("ms-teams.exe", "予約システム開発のチャット", false), read: read_ok(body, ""), read_calls: 0 };
+        let mut unavailable = Scripted {
+            answers: vec![
+                JevOutcome::Answer { choice: "request".into(), confidence: 0.8 },
+                JevOutcome::Unavailable,
+            ],
+            calls: 0,
+        };
+        let report = capture(&store, &mut reader, true, Some(&mut unavailable)).unwrap();
+        assert_eq!(unavailable.calls, 2);
+        assert!(report.contains("評価は保留"));
+        assert!(report.contains("到達したかは未確認"));
+        let (sent, reasons): (i64, String) = store.connection().query_row(
+            "SELECT sent, reason_codes FROM screen_evals ORDER BY rowid LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(sent, 1);
+        assert!(reasons.split(',').any(|code| code == "jev_unavailable"));
+        let step_key = format!("capture:text:{}", text_hash(body));
+        assert!(crate::graph::find_step(&store, &step_key).unwrap().is_none());
+        assert!(previous_sent_eval(&store, body).unwrap().is_none());
+
+        let mut retry = Scripted {
+            answers: vec![
+                JevOutcome::Answer { choice: "request".into(), confidence: 0.8 },
+                JevOutcome::Answer { choice: "mine".into(), confidence: 0.8 },
+                JevOutcome::Answer { choice: "today".into(), confidence: 0.8 },
+                JevOutcome::Answer { choice: "new".into(), confidence: 0.8 },
+                JevOutcome::Answer { choice: "register".into(), confidence: 0.8 },
+            ],
+            calls: 0,
+        };
+        capture(&store, &mut reader, true, Some(&mut retry)).unwrap();
+        assert_eq!(retry.calls, 5);
+        assert!(previous_sent_eval(&store, body).unwrap().is_some());
+
+        let mut local = Scripted { answers: Vec::new(), calls: 0 };
+        let local_report = capture(&store, &mut reader, false, Some(&mut local)).unwrap();
+        assert_eq!(local.calls, 0);
+        assert!(local_report.contains("本文は送っていません"));
+        let local_sent: i64 = store.connection().query_row(
+            "SELECT sent FROM screen_evals ORDER BY rowid DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(local_sent, 0);
+        drop(g);
+    }
+
+    #[test]
     fn sent_eval_stores_five_answers_and_a_later_revision_keeps_both() {
         let (g, store) = temp_store();
         let body = "9月25日15時までに、LINE連携の仕様書をレビューしてください";
@@ -1473,6 +1564,90 @@ mod tests {
         let refer: String = store.connection().query_row("SELECT source_ref FROM candidates", [], |r| r.get(0)).unwrap();
         assert!(refer.starts_with("screen:"));
         assert!(!refer.contains("element"));
+        drop(g);
+    }
+
+    #[test]
+    fn local_capture_does_not_reuse_a_prior_sent_evaluation() {
+        let (g, store) = temp_store();
+        let body = "9月25日15時までに、LINE連携の仕様書をレビューしてください";
+        let mut reader = Fixed { fg: fg("ms-teams.exe", "予約システム開発のチャット", false), read: read_ok(body, ""), read_calls: 0 };
+        let mut sent = Scripted {
+            answers: vec![
+                JevOutcome::Answer { choice: "request".into(), confidence: 0.8 },
+                JevOutcome::Answer { choice: "mine".into(), confidence: 0.8 },
+                JevOutcome::Answer { choice: "today".into(), confidence: 0.8 },
+                JevOutcome::Answer { choice: "new".into(), confidence: 0.8 },
+                JevOutcome::Answer { choice: "register".into(), confidence: 0.8 },
+            ],
+            calls: 0,
+        };
+        capture(&store, &mut reader, true, Some(&mut sent)).unwrap();
+        assert_eq!(sent.calls, 5);
+
+        let mut no_send = Scripted { answers: Vec::new(), calls: 0 };
+        let text = capture(&store, &mut reader, false, Some(&mut no_send)).unwrap();
+        assert_eq!(no_send.calls, 0);
+        assert!(text.contains("本文は送っていません"));
+        assert!(!text.contains("同じ文章なので再判断しません"));
+        let sent_values: Vec<i64> = store.connection().prepare(
+            "SELECT sent FROM screen_evals ORDER BY evaluated_at, id",
+        ).unwrap().query_map([], |r| r.get(0)).unwrap().collect::<std::result::Result<_, _>>().unwrap();
+        assert_eq!(sent_values, vec![1, 0]);
+        drop(g);
+    }
+
+    #[test]
+    fn reused_sent_assessment_is_recorded_as_not_sent_this_invocation() {
+        let (g, store) = temp_store();
+        let body = "LINE連携の仕様書をレビューしてください";
+        let mut reader = Fixed { fg: fg("ms-teams.exe", "予約システム開発のチャット", false), read: read_ok(body, ""), read_calls: 0 };
+        let mut first = Scripted {
+            answers: vec![
+                JevOutcome::Answer { choice: "request".into(), confidence: 0.8 },
+                JevOutcome::Answer { choice: "mine".into(), confidence: 0.8 },
+                JevOutcome::Answer { choice: "today".into(), confidence: 0.8 },
+                JevOutcome::Answer { choice: "new".into(), confidence: 0.8 },
+                JevOutcome::Answer { choice: "register".into(), confidence: 0.8 },
+            ],
+            calls: 0,
+        };
+        capture(&store, &mut reader, true, Some(&mut first)).unwrap();
+        assert_eq!(first.calls, 5);
+
+        let mut second = Scripted { answers: Vec::new(), calls: 0 };
+        let report = capture(&store, &mut reader, true, Some(&mut second)).unwrap();
+        assert_eq!(second.calls, 0);
+        assert!(report.contains("以前の送信評価を再利用しました。この実行では本文を送っていません。"));
+        assert!(report.contains("内容の種類: 対応依頼"));
+
+        let rows: Vec<(i64, String)> = store.connection().prepare(
+            "SELECT sent, reason_codes FROM screen_evals ORDER BY rowid",
+        ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<std::result::Result<_, _>>().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, 1);
+        assert_eq!(rows[1].0, 0);
+        assert!(rows[1].1.split(',').any(|code| code == "reused_prior_sent_eval"));
+
+        // A later reuse still selects the original evaluation that was actually sent.
+        let mut third = Scripted { answers: Vec::new(), calls: 0 };
+        capture(&store, &mut reader, true, Some(&mut third)).unwrap();
+        assert_eq!(third.calls, 0);
+        let sent_rows: i64 = store.connection().query_row("SELECT COUNT(*) FROM screen_evals WHERE sent=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(sent_rows, 1);
+        drop(g);
+    }
+
+    #[test]
+    fn saved_send_step_does_not_authorize_a_local_capture() {
+        let (g, store) = temp_store();
+        crate::graph::remember_step(&store, "capture:body", "send", Some("saved choice")).unwrap();
+        let body = "仕様書をレビューしてください";
+        let mut reader = Fixed { fg: fg("outlook.exe", "Outlook", false), read: read_ok(body, ""), read_calls: 0 };
+        let text = run_capture(&store, &mut reader, false).unwrap();
+        assert!(text.contains("本文は送っていません"));
+        let sent: i64 = store.connection().query_row("SELECT sent FROM screen_evals", [], |r| r.get(0)).unwrap();
+        assert_eq!(sent, 0);
         drop(g);
     }
 

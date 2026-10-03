@@ -138,7 +138,9 @@ pub fn propose_unknown(
 ) -> Result<Vec<Proposal>> {
     graph::apply_known_tasks(store, date)?;
     let mut out = Vec::new();
+    let protected = crate::commitment::protected_task_ids(store)?;
     for t in store.open_tasks_for_day(date)? {
+        if protected.contains(&t.id) { continue; }
         let sit = Situation::from_task(&t, "close");
         if graph::resolve(store, &sit)?.is_some() {
             continue;
@@ -248,7 +250,9 @@ fn grow_tasks(
     graph::apply_known_tasks(store, date)?;
     let choices = disposition_choices();
     let mut n = 0;
+    let protected = crate::commitment::protected_task_ids(store)?;
     for t in store.open_tasks_for_day(date)? {
+        if protected.contains(&t.id) { continue; }
         let sit = Situation::from_task(&t, "close");
         if let Some(edge) = graph::resolve(store, &sit)? {
             if matches!(edge.to_choice.as_str(), "done" | "start" | "not_done" | "carry" | "drop") {

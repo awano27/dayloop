@@ -154,10 +154,11 @@ fn the_same_visible_subject_and_the_same_screen_text_skip_jev() {
     let home = Home::new();
     let store = home.store();
     let mut once = Once { calls: 0 };
-    let (keep, via) = judge_visible(&store, "gmail", "見積の確認", "見積の確認をお願いします", &[], &mut once, 0.5).unwrap();
+    let identity = dayloop::browse::item_identity(None, "見積の確認", "見積の確認をお願いします").unwrap();
+    let (keep, via) = judge_visible(&store, "gmail", "見積の確認をお願いします", Some(&identity), &[], &mut once, 0.5).unwrap();
     assert!(keep);
     assert_eq!(via, "Jev");
-    let (again, via) = judge_visible(&store, "gmail", "見積の確認", "見積の確認をお願いします", &[], &mut Boom, 0.5).unwrap();
+    let (again, via) = judge_visible(&store, "gmail", "見積の確認をお願いします", Some(&identity), &[], &mut Boom, 0.5).unwrap();
     assert!(again);
     assert_eq!(via, "グラフ");
 
@@ -170,6 +171,45 @@ fn the_same_visible_subject_and_the_same_screen_text_skip_jev() {
     let mut second = window("olk.exe", "受信トレイ - Outlook", body);
     let report = screen::capture(&store, &mut second, true, Some(&mut Boom)).unwrap();
     assert!(report.contains("グラフ: 同じ文章なので再判断しません"));
+}
+
+#[test]
+fn same_subject_different_content_gets_independent_browse_decisions() {
+    let home = Home::new();
+    let store = home.store();
+    let subject = "件名".repeat(40);
+    let shared_prefix = "x".repeat(1999);
+    let body_a = format!("{shared_prefix}A");
+    let body_b = format!("{shared_prefix}B");
+    let identity_a = dayloop::browse::item_identity(Some("shared-thread"), &subject, &body_a).unwrap();
+    let identity_b = dayloop::browse::item_identity(Some("shared-thread"), &subject, &body_b).unwrap();
+    assert_ne!(identity_a, identity_b);
+
+    let mut jev = Once { calls: 0 };
+    let (keep_a, via_a) = judge_visible(&store, "gmail", &body_a, Some(&identity_a), &[], &mut jev, 0.5).unwrap();
+    let (keep_b, via_b) = judge_visible(&store, "gmail", &body_b, Some(&identity_b), &[], &mut jev, 0.5).unwrap();
+    assert!(keep_a && keep_b);
+    assert_eq!((via_a, via_b), ("Jev", "Jev"));
+    assert_eq!(jev.calls, 2);
+
+    let (again, via) = judge_visible(&store, "gmail", &body_a, Some(&identity_a), &[], &mut Boom, 0.5).unwrap();
+    assert!(again);
+    assert_eq!(via, "グラフ");
+}
+
+#[test]
+fn empty_body_does_not_persist_a_decision_even_with_page_identity() {
+    let home = Home::new();
+    let store = home.store();
+    assert!(dayloop::browse::item_identity(Some("thread-1"), "通知", " \n ").is_none());
+    let mut jev = Once { calls: 0 };
+    for _ in 0..2 {
+        let (keep, via) = judge_visible(&store, "gmail", "通知", None, &[], &mut jev, 0.5).unwrap();
+        assert!(keep);
+        assert_eq!(via, "Jev");
+    }
+    assert_eq!(jev.calls, 2);
+    assert!(!graph::list_steps(&store).unwrap().contains("browse:gmail:"));
 }
 
 #[test]

@@ -10,10 +10,10 @@ use crate::store::{CarryBlocked, Store};
 use crate::util::{next_workday, parse_date, resolve_date};
 
 pub fn list() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         tool("get_today", "今日（または指定日）のタスクと Day の状態、未処理候補数、未クローズの過去日を返す。会話の最初に呼ぶ。", obj(&[("date", str_date())], &[])),
         tool("plan_day", "朝に呼ぶ。未クローズ日・候補・未計画・今日の予定と questions を返す。本人に1問ずつ聞き、options の tool と needs で反映してから confirm_plan する。", obj(&[("date", str_date())], &[])),
-        tool("confirm_plan", "plan_day の questions を処理したあと、その日の予定を確定し plan_confirmed_at を記録する。", obj(&[("date", str_date())], &[])),
+        tool("confirm_plan", "plan_day の確認事項に回答したあと、最後の確定質問の plan_revision と日付で計画を確定する。未回答や表示後の変更があれば再表示を要求する。", obj(&[("date", str_date()), ("plan_revision", schema("string", "plan_day の確定質問が返した表示内容の版"))], &["plan_revision"])),
         tool("add_task", "タスクを追加する。backlog=true なら未計画、そうでなければ date（省略時は今日）の予定になる。", obj(&[("title", schema("string", "タスク名")), ("due", schema("string", "期限 YYYY-MM-DD")), ("estimate_min", schema("integer", "見積（分）")), ("date", str_date()), ("backlog", schema("boolean", "未計画に入れる"))], &["title"])),
         tool("schedule_task", "未計画のタスクを指定日の予定に入れる。plan_day の backlog 質問への回答。", obj(&[("id", str_id()), ("date", schema("string", "予定日 YYYY-MM-DD"))], &["id", "date"])),
         tool("start_task", "タスクを進行中にする。未計画なら date（省略時は今日）の予定に入れてから着手する。", obj(&[("id", str_id()), ("date", str_date())], &["id"])),
@@ -23,7 +23,7 @@ pub fn list() -> Vec<Value> {
         tool("drop_task", "タスクを取り下げる。reason は空にできない。", obj(&[("id", str_id()), ("reason", schema("string", "取り下げ理由"))], &["id", "reason"])),
         tool("split_task", "タスクを2つ以上に分割する。元は取り下げ、titles が to（省略時は次の営業日）の予定になる。持ち越し上限の解消に使う。", obj(&[("id", str_id()), ("titles", json!({"type":"array","items":{"type":"string"},"description":"分割後のタイトル（2つ以上）"})), ("reason", schema("string", "分割理由")), ("to", schema("string", "分割先 YYYY-MM-DD"))], &["id", "titles", "reason"])),
         tool("check_in", "昼に呼ぶ。進行中・未着手と questions を返す。本人に1問ずつ聞き、options の tool と needs で反映する。", obj(&[("date", str_date())], &[])),
-        tool("close_day", "夕方に呼ぶ。open が残った場合は closed=false と questions を返す。既定値では閉じない。questions を本人に1問ずつ聞き、options の tool と needs で確定してから再度呼ぶ。", obj(&[("date", str_date())], &[])),
+        tool("close_day", "夕方に呼ぶ。closed は既に閉じた事実、pending_count と questions は現在の未回答。閉じた後の確認も消さない。本人に1問ずつ聞き、options の tool と needs で回答して再実行する。", obj(&[("date", str_date())], &[])),
         tool("retro_week", "週末に呼ぶ。週の集計・日別・持ち越し上位と、carried_count>=3 の open タスクの questions を返す。", obj(&[("date", str_date())], &[])),
         tool("list_candidates", "採用/却下待ちの候補を返す。age_days と stale（7日以上）付き。", obj(&[], &[])),
         tool("add_candidate", "候補箱に追加する。同じ source_ref が既にあるか却下済みなら skipped を返す。", obj(&[("title", schema("string", "候補のタイトル")), ("source", schema("string", "teams / outlook / meeting / alert / manual")), ("source_ref", schema("string", "元メッセージ等への参照"))], &["title", "source"])),
@@ -43,7 +43,49 @@ pub fn list() -> Vec<Value> {
                 &["first", "second"],
             ),
         ),
-    ]
+    ];
+    tools.extend(commitment_tools());
+    tools
+}
+
+fn commitment_tools() -> Vec<Value> {
+    let text = |description: &str| schema("string", description);
+    let ids = || json!({"type":"array","items":{"type":"string"},"description":"完全なタスクID。件名では照合しない"});
+    let mut tools = Vec::new();
+    for (name, description, props, required) in [
+        ("commitment_register", "依頼と相手待ちを台帳へ登録。日を閉じても残り、タスクは完了にしない。", vec![
+            ("op_id", text("操作の一意ID。同じ内容の再実行に再利用")), ("request", text("依頼内容")), ("counterparty", text("待ち相手")),
+            ("reply_due", text("返答期限 RFC3339")), ("next_check", text("次の確認日時 RFC3339")), ("source", text("情報元")),
+            ("source_ref", text("元情報の参照")), ("evidence", text("登録の根拠")), ("related_task_ids", ids()), ("blocked_task_ids", ids())
+        ], vec!["op_id","request","counterparty","next_check","source","evidence"]),
+        ("commitment_list", "未決着を含む約束と同期状況。取得失敗は返答なしを意味しない。", vec![("at",text("確認時点 RFC3339。省略時は現在"))],vec![]),
+        ("commitment_ingest", "新規依頼・追加情報・期限変更・取消・返答を提案として保存。確定しない。件名だけで統合しない。",vec![
+            ("source",text("情報元")),("external_id",text("情報元内のイベント一意ID")),("kind",json!({"type":"string","enum":["new_request","additional_info","deadline_change","cancellation","reply"]})),
+            ("occurred_at",text("元情報の発生日時 RFC3339")),("commitment_id",text("対応する約束の完全ID。不明時は省略し候補を本人に確認")),
+            ("request",text("依頼内容")),("counterparty",text("待ち相手")),("reply_due",text("新しい返答期限 RFC3339")),("next_check",text("新しい確認日時 RFC3339")),
+            ("source_ref",text("元情報の参照")),("evidence",text("変更等の根拠")),("related_task_ids",ids()),("blocked_task_ids",ids())
+        ],vec!["source","external_id","kind","occurred_at","evidence"]),
+        ("commitment_apply", "本人が確認した変更だけ確定。画面提示後に版が変わったら再読込。古い変更は上書き不可。",vec![
+            ("op_id",text("操作の一意ID")),("update_id",text("変更提案の完全ID")),("commitment_id",text("本人が選んだ約束の完全ID")),
+            ("expected_revision",schema("integer","提示時の版番号。新規は0")),("confirmed",schema("boolean","本人の明示確認後だけtrue。無回答では送らない")),
+            ("action",json!({"type":"string","enum":["apply","reject"]})),("evidence",text("却下の根拠"))
+        ],vec!["op_id","update_id","expected_revision","confirmed"]),
+        ("commitment_check", "本人の確認で次回確認、返答後の作業リンク、決着を記録。返答だけでタスク完了にしない。",vec![
+            ("op_id",text("操作の一意ID")),("commitment_id",text("約束の完全ID")),("expected_revision",schema("integer","提示時の版番号")),
+            ("confirmed",schema("boolean","本人の明示確認後だけtrue")),("action",json!({"type":"string","enum":["defer","acknowledge","settle"]})),
+            ("evidence",text("確認・決着の根拠")),("next_check",text("次の確認日時 RFC3339")),("next_task_id",text("別途本人が登録した次の自分の作業の完全ID"))
+        ],vec!["op_id","commitment_id","expected_revision","confirmed","action","evidence"]),
+        ("commitment_history", "変更前後・根拠・提案・判断の履歴。閉じた日のタスク履歴を書き換えない。",vec![("commitment_id",text("約束の完全ID"))],vec!["commitment_id"]),
+        ("commitment_sync", "取込の成功・部分取得・失敗・利用不可を保存。変更なしや返答なしを推測しない。",vec![
+            ("op_id",text("同期操作の一意ID")),("source",text("情報元")),("status",json!({"type":"string","enum":["success","partial","failed","unavailable"]})),
+            ("at",text("取得時刻 RFC3339")),("evidence",text("件数、取得範囲または失敗の根拠"))
+        ],vec!["op_id","source","status","at","evidence"]),
+    ] {
+        let mut input = obj(&props, &required);
+        input["additionalProperties"] = json!(false);
+        tools.push(tool(name, description, input));
+    }
+    tools
 }
 
 pub fn dispatch(store: &Store, name: &str, args: &Value) -> Value {
@@ -62,6 +104,9 @@ pub fn dispatch(store: &Store, name: &str, args: &Value) -> Value {
 }
 
 fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
+    if name.starts_with("commitment_") {
+        return crate::commitment::dispatch(store, name, args);
+    }
     match name {
         "get_today" => engine::today_view(store, &date_arg(args)?),
         "plan_day" => {
@@ -74,7 +119,7 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
         }
         "confirm_plan" => {
             let d = date_arg(args)?;
-            store.confirm_plan(&d)?;
+            store.confirm_plan(&d, opt_str(args, "plan_revision").as_deref())?;
             markdown::export(store, &d)?;
             let day = store.get_day(&d)?;
             Ok(json!({ "plan_confirmed_at": day.and_then(|x| x.plan_confirmed_at) }))
@@ -118,7 +163,8 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
         }
         "finish_task" => {
             let id = req_str(args, "id")?;
-            let t = store.transition(&id, State::Done, None, opt_str(args, "evidence").as_deref())?;
+            let t =
+                store.transition(&id, State::Done, None, opt_str(args, "evidence").as_deref())?;
             export_task(store, &t)?;
             Ok(serde_json::to_value(t)?)
         }
@@ -147,7 +193,12 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
             if let Some(r) = opt_str(args, "reschedule_due") {
                 parse_date(&r)?;
             }
-            let t = store.carry_over(&old.id, &reason, &to, opt_str(args, "reschedule_due").as_deref())?;
+            let t = store.carry_over(
+                &old.id,
+                &reason,
+                &to,
+                opt_str(args, "reschedule_due").as_deref(),
+            )?;
             export_task(store, &old)?;
             export_task(store, &t)?;
             Ok(serde_json::to_value(t)?)
@@ -198,26 +249,19 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
             observe_first(store, &d)?;
             crate::graph::apply_known_tasks(store, &d)?;
             crate::jev::grow_if_configured(store, &d)?;
-            let open = store.open_tasks_for_day(&d)?;
-            if !open.is_empty() {
-                return engine::close_view(store, &d);
+            let status = store.close_day_status(&d)?;
+            if status.closed && !status.already_closed {
+                markdown::export(store, &d)?;
             }
-            match store.close_day(&d)? {
-                Ok(()) => {
-                    markdown::export(store, &d)?;
-                    Ok(json!({ "closed": true, "open": [], "questions": [] }))
-                }
-                Err(rest) => Ok(json!({
-                    "closed": false,
-                    "open": rest,
-                    "questions": rest.iter().map(engine::Question::close_task).collect::<Vec<_>>(),
-                })),
-            }
+            engine::close_status_view(store, &d, &status)
         }
         "retro_week" => engine::retro_view(store, &date_arg(args)?),
         "list_candidates" => {
             let cands = store.open_candidates()?;
-            Ok(json!(cands.iter().map(engine::candidate_json).collect::<Vec<_>>()))
+            Ok(json!(cands
+                .iter()
+                .map(engine::candidate_json)
+                .collect::<Vec<_>>()))
         }
         "add_candidate" => {
             let title = req_str(args, "title")?;
@@ -289,23 +333,28 @@ fn req_str(args: &Value, k: &str) -> Result<String> {
 }
 
 fn opt_str(args: &Value, k: &str) -> Option<String> {
-    args.get(k).and_then(|v| {
-        if v.is_null() {
-            None
-        } else {
-            v.as_str().map(|s| s.to_string())
-        }
-    })
-    .filter(|s| !s.is_empty())
+    args.get(k)
+        .and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s.to_string())
+            }
+        })
+        .filter(|s| !s.is_empty())
 }
 
 fn opt_i64(args: &Value, k: &str) -> Option<i64> {
-    args.get(k).and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+    args.get(k)
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
 }
 
 fn opt_bool(args: &Value, k: &str) -> bool {
     args.get(k)
-        .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true" || s == "1")))
+        .and_then(|v| {
+            v.as_bool()
+                .or_else(|| v.as_str().map(|s| s == "true" || s == "1"))
+        })
         .unwrap_or(false)
 }
 

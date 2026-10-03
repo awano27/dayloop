@@ -1,12 +1,12 @@
 pub mod chat_live;
 pub mod devops_live;
-pub mod recap;
 pub mod fixture;
 pub mod github_intake;
 pub mod jira_live;
 pub mod minutes;
 pub mod model;
 pub mod outlook_com;
+pub mod recap;
 pub mod rules;
 pub mod teams;
 pub mod tickets;
@@ -88,7 +88,9 @@ pub fn ingest(
     let mut added = 0usize;
     let mut skipped = 0usize;
     for m in &mails {
-        let Some(hit) = mail_hit(m, cfg) else { continue };
+        let Some(hit) = mail_hit(m, cfg) else {
+            continue;
+        };
         if dry_run {
             println!("  [{}] {}", hit.reason, hit.title);
             added += 1;
@@ -99,14 +101,20 @@ pub fn ingest(
         } else {
             hit.source_ref.clone()
         };
-        let source_name = if src.name() == "graph" { "mail" } else { "outlook" };
+        let source_name = if src.name() == "graph" {
+            "mail"
+        } else {
+            "outlook"
+        };
         match store.add_candidate(&hit.title, source_name, Some(&source_ref))? {
             Some(_) => added += 1,
             None => skipped += 1,
         }
     }
     for c in &cals {
-        let Some(hit) = event_prep_hit(c, now, cfg) else { continue };
+        let Some(hit) = event_prep_hit(c, now, cfg) else {
+            continue;
+        };
         if dry_run {
             println!("  [{}] {}", hit.reason, hit.title);
             added += 1;
@@ -117,7 +125,11 @@ pub fn ingest(
         } else {
             hit.source_ref.clone()
         };
-        let source_name = if src.name() == "graph" { "meeting" } else { "outlook" };
+        let source_name = if src.name() == "graph" {
+            "meeting"
+        } else {
+            "outlook"
+        };
         match store.add_candidate(&hit.title, source_name, Some(&source_ref))? {
             Some(_) => added += 1,
             None => skipped += 1,
@@ -212,9 +224,44 @@ pub fn run_fixture(store: &Store, dir: &std::path::Path, cfg: &Config) -> Result
             }
         }
     }
-    let src = FixtureSource::load(dir)?;
+    let src = match FixtureSource::load(dir) {
+        Ok(source) => source,
+        Err(error) => {
+            let failed = SyncResult { name:"fixture".into(), ok:false, candidates_added:0, candidates_skipped:0, events:0, error:Some(error.to_string()) };
+            record_sync(store, &failed, "failed")?;
+            return Err(error);
+        }
+    };
     let since = Local::now() - Duration::days(intake.lookback_days.max(30));
-    ingest(store, &src, &intake, since, Local::now(), false)
+    let mut result = match ingest(store, &src, &intake, since, Local::now(), false) {
+        Ok(result) => result,
+        Err(error) => {
+            let failed = SyncResult { name:"fixture".into(), ok:false, candidates_added:0, candidates_skipped:0, events:0, error:Some(error.to_string()) };
+            record_sync(store, &failed, "partial")?;
+            return Err(error);
+        }
+    };
+    let updates = dir.join("commitments.json");
+    if updates.exists() {
+        let imported = (|| -> Result<()> {
+            let text = std::fs::read_to_string(&updates)?;
+            let rows: Vec<Value> = serde_json::from_str(&text)?;
+            for row in rows {
+                crate::commitment::dispatch(store, "commitment_ingest", &row)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = imported {
+            result.ok = false;
+            result.error = Some(format!("約束fixtureは部分取得/取込失敗: {error}"));
+        }
+    }
+    record_sync(
+        store,
+        &result,
+        if result.ok { "success" } else { "partial" },
+    )?;
+    Ok(result)
 }
 
 pub fn sync_all(store: &Store, cfg: &Config) -> Vec<SyncResult> {
@@ -231,14 +278,46 @@ pub fn sync_all(store: &Store, cfg: &Config) -> Vec<SyncResult> {
         }
     }
     out.extend(
-        [run_github(store), run_jira(store), run_teams(store), run_devops(store)]
-            .into_iter()
-            .flatten(),
+        [
+            run_github(store),
+            run_jira(store),
+            run_teams(store),
+            run_devops(store),
+        ]
+        .into_iter()
+        .flatten(),
     );
     if let Some(inbox) = run_inbox(store) {
         out.push(inbox);
     }
+    for result in &mut out {
+        // Existing adapters may cap their result set. Success does not prove
+        // complete coverage of replies or changes.
+        let status = if result.ok { "partial" } else { "failed" };
+        if let Err(error) = record_sync(store, result, status) {
+            result.ok = false;
+            result.error = Some(format!("同期記録の保存に失敗: {error}"));
+        }
+    }
     out
+}
+
+fn record_sync(store: &Store, result: &SyncResult, status: &str) -> Result<()> {
+    crate::commitment::dispatch(
+        store,
+        "commitment_sync",
+        &json!({
+            "op_id": ulid::Ulid::new().to_string(),
+            "source": result.name,
+            "status": status,
+            "at": chrono::Utc::now().to_rfc3339(),
+            "evidence": format!("候補追加={},重複={},予定={},取得範囲の完全性={},詳細={}",
+                result.candidates_added, result.candidates_skipped, result.events,
+                if status == "success" { "fixture範囲内" } else { "未確認" },
+                result.error.as_deref().unwrap_or("adapter returned")),
+        }),
+    )?;
+    Ok(())
 }
 
 fn run_devops(store: &Store) -> Option<SyncResult> {
@@ -246,7 +325,9 @@ fn run_devops(store: &Store) -> Option<SyncResult> {
         return None;
     }
     match crate::devops::fetch_assigned() {
-        Ok(items) => devops_live::ingest(store, &items).ok().map(|n| counted("devops", n)),
+        Ok(items) => devops_live::ingest(store, &items)
+            .ok()
+            .map(|n| counted("devops", n)),
         Err(e) => Some(SyncResult {
             name: "devops".into(),
             ok: false,
@@ -277,8 +358,15 @@ fn run_inbox(store: &Store) -> Option<SyncResult> {
         let Ok(raw) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let text = if ext.starts_with("htm") { strip_tags(&raw) } else { raw };
-        let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let text = if ext.starts_with("htm") {
+            strip_tags(&raw)
+        } else {
+            raw
+        };
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         let actions = recap::actions(&text);
         if actions.is_empty() {
             if let Ok(report) = minutes::ingest(store, &text) {
@@ -380,7 +468,9 @@ fn run_github(store: &Store) -> Option<SyncResult> {
         return None;
     }
     match crate::github::fetch_assigned() {
-        Ok(items) => github_intake::ingest(store, &items).ok().map(|n| counted("github", n)),
+        Ok(items) => github_intake::ingest(store, &items)
+            .ok()
+            .map(|n| counted("github", n)),
         Err(e) => Some(SyncResult {
             name: "github".into(),
             ok: false,
@@ -397,7 +487,9 @@ fn run_jira(store: &Store) -> Option<SyncResult> {
         return None;
     }
     match crate::jira::fetch_assigned() {
-        Ok(items) => jira_live::ingest(store, &items).ok().map(|n| counted("jira", n)),
+        Ok(items) => jira_live::ingest(store, &items)
+            .ok()
+            .map(|n| counted("jira", n)),
         Err(e) => Some(SyncResult {
             name: "jira".into(),
             ok: false,
@@ -414,7 +506,9 @@ fn run_teams(store: &Store) -> Option<SyncResult> {
         return None;
     }
     match crate::chat::fetch_recent() {
-        Ok(items) => chat_live::ingest(store, &items).ok().map(|n| counted("teams", n)),
+        Ok(items) => chat_live::ingest(store, &items)
+            .ok()
+            .map(|n| counted("teams", n)),
         Err(e) => Some(SyncResult {
             name: "teams".into(),
             ok: false,

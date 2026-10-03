@@ -44,6 +44,7 @@ impl Home {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), "[jev]\nmode = \"off\"\n").unwrap();
         unsafe {
             std::env::set_var("DAYLOOP_HOME", &dir);
         }

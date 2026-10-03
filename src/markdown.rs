@@ -121,8 +121,9 @@ pub struct ImportReport {
 pub fn import(store: &Store, date: &str) -> Result<ImportReport> {
     let path = paths::day_md_path(date);
     let text = std::fs::read_to_string(&path)?;
-    let mut report = ImportReport { completed: 0, added: 0 };
     let mut in_tasks = false;
+    let mut completed_ids = Vec::new();
+    let mut additions = Vec::new();
     for raw in text.lines() {
         let line = raw.trim_end();
         if line.starts_with("## ") {
@@ -137,25 +138,23 @@ pub fn import(store: &Store, date: &str) -> Result<ImportReport> {
         let body = rest.get(2..).unwrap_or("").trim();
         let (title_part, id) = match body.find("<!-- id:") {
             Some(i) => {
-                let id = body[i + 8..].trim_end_matches("-->").trim().to_string();
+                let Some(end) = body[i + 8..].find("-->") else {
+                    anyhow::bail!("Markdown の task ID コメントが閉じていません: {line}");
+                };
+                let id = body[i + 8..i + 8 + end].trim().to_string();
                 (body[..i].trim().to_string(), Some(id))
             }
             None => (body.to_string(), None),
         };
         match (mark, id) {
-            ('x' | 'X', Some(id)) => {
-                let t = store.get_task(&id)?;
-                if t.state.is_open() {
-                    store.transition(&t.id, State::Done, None, Some("markdown"))?;
-                    report.completed += 1;
-                }
-            }
+            ('x' | 'X', Some(id)) if !id.is_empty() => completed_ids.push(id),
+            ('x' | 'X', _) => anyhow::bail!("完了行に task ID がありません: {line}"),
             (' ', None) if !title_part.is_empty() => {
-                store.add_task(&title_part, None, None, "manual", None, Some(date))?;
-                report.added += 1;
+                additions.push(title_part);
             }
             _ => {}
         }
     }
-    Ok(report)
+    let (completed, added) = store.apply_markdown_import(date, &completed_ids, &additions)?;
+    Ok(ImportReport { completed, added })
 }

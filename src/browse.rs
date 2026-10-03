@@ -14,6 +14,7 @@ const MAX_OPENS: usize = 5;
 pub struct PageItem {
     pub index: usize,
     pub label: String,
+    pub identity: Option<String>,
 }
 
 pub fn site_url(site: &str) -> Result<&'static str> {
@@ -118,15 +119,27 @@ pub fn board_subject(store: &Store, label: &str) -> Result<String> {
 pub fn judge_visible(
     store: &Store,
     site: &str,
-    subject: &str,
     evidence: &str,
+    identity: Option<&str>,
     keywords: &[String],
     decider: &mut dyn Decider,
     floor: f64,
 ) -> Result<(bool, &'static str)> {
-    let key = format!("browse:{site}:{}", step_key(subject));
     let state = format!("この件を今日の候補にしますか。\n{evidence}");
-    let decision = jev::decide_step(store, &key, &state, &["keep", "skip"], decider, floor)?;
+    let decision = if let Some(identity) = identity {
+        let key = format!("browse:{site}:{identity}");
+        jev::decide_step(store, &key, &state, &["keep", "skip"], decider, floor)?
+    } else {
+        let choices = vec!["keep".to_string(), "skip".to_string()];
+        match decider.decide(&state, &choices) {
+            JevOutcome::Answer { choice, confidence }
+                if confidence >= floor && choices.contains(&choice) =>
+            {
+                jev::StepDecision { choice: Some(choice), from_graph: false }
+            }
+            _ => jev::StepDecision { choice: None, from_graph: false },
+        }
+    };
     if let Some(choice) = decision.choice {
         let via = if decision.from_graph { "グラフ" } else { "Jev" };
         return Ok((choice == "keep", via));
@@ -135,8 +148,38 @@ pub fn judge_visible(
     Ok((keep, "キーワード"))
 }
 
-fn step_key(subject: &str) -> String {
-    subject.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect()
+/// An opaque identity for graph keys and candidate source references.
+/// Combine a page identifier with bounded visible content when both are available.
+pub fn item_identity(page_id: Option<&str>, subject: &str, body: &str) -> Option<String> {
+    if body.trim().is_empty() {
+        return None;
+    }
+    let normalized = format!("{}\n{}", normalize_content(subject), normalize_content(body));
+    let bounded: String = normalized.chars().take(4096).collect();
+    let content = stable_fingerprint("content", &bounded, 4096);
+    let page = page_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| stable_fingerprint("page-id", value, 512));
+    Some(match page {
+        Some(page) => format!("item-{page}-content-{content}"),
+        None => format!("content-{content}"),
+    })
+}
+
+fn normalize_content(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// Fixed FNV-1a 128-bit hashing makes the persisted value deterministic without
+// storing page URLs or message bodies in the graph or candidate tables.
+fn stable_fingerprint(domain: &str, value: &str, max_chars: usize) -> String {
+    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000000000000000013b;
+    let bounded: String = value.chars().take(max_chars).collect();
+    let input = format!("{domain}\0{bounded}");
+    let hash = input.bytes().fold(OFFSET, |hash, byte| (hash ^ u128::from(byte)).wrapping_mul(PRIME));
+    format!("{hash:032x}")
 }
 
 pub fn keep_message(outcome: &JevOutcome, text: &str, keywords: &[String]) -> bool {
@@ -205,9 +248,18 @@ pub fn run(store: &Store, site: &str) -> Result<usize> {
         let body = page.read_pane().unwrap_or_default();
         let evidence = format!("{subject}\n{body}");
         let floor = crate::config::load().jev.commit_confidence.unwrap_or(jev::DEFAULT_FLOOR);
-        let (keep, via) = judge_visible(store, site, &subject, &evidence, &keywords, &mut decider, floor)?;
+        let identity = item_identity(item.identity.as_deref(), &subject, &body);
+        let (keep, via) = judge_visible(
+            store,
+            site,
+            &evidence,
+            identity.as_deref(),
+            &keywords,
+            &mut decider,
+            floor,
+        )?;
         println!("開いた: {subject} / {via}: {}", if keep { "keep" } else { "skip" });
-        if keep && save_one(store, site, &subject, &body)? {
+        if keep && save_one(store, site, &subject, &body, identity.as_deref())? {
             added += 1;
         }
         opened += 1;
@@ -220,7 +272,7 @@ pub fn run(store: &Store, site: &str) -> Result<usize> {
     Ok(added)
 }
 
-fn save_one(store: &Store, site: &str, label: &str, body: &str) -> Result<bool> {
+fn save_one(store: &Store, site: &str, label: &str, body: &str, identity: Option<&str>) -> Result<bool> {
     let title = if site == "boards" {
         work_item_title(label)
     } else {
@@ -234,14 +286,14 @@ fn save_one(store: &Store, site: &str, label: &str, body: &str) -> Result<bool> 
         "boards" => "ticket",
         _ => "mail",
     };
-    let source_ref = format!("browse:{site}:{title}");
+    let source_ref = identity.map(|identity| format!("browse:{site}:{identity}"));
     let shown = if site == "boards" || body.trim().is_empty() {
         title.to_string()
     } else {
         let excerpt: String = body.split_whitespace().take(24).collect::<Vec<_>>().join(" ");
         format!("{title} {excerpt}")
     };
-    Ok(store.add_candidate(&shown, source, Some(&source_ref))?.is_some())
+    Ok(store.add_candidate(&shown, source, source_ref.as_deref())?.is_some())
 }
 
 struct Browser {
@@ -285,10 +337,16 @@ impl Browser {
         Ok(labels
             .into_iter()
             .enumerate()
-            .filter_map(|(index, label)| {
-                let label = label.as_str()?.trim().to_string();
+            .filter_map(|(index, item)| {
+                let label = item.get("label")?.as_str()?.trim().to_string();
                 if allowed_label(&label) {
-                    Some(PageItem { index, label })
+                    let identity = item
+                        .get("identity")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|identity| !identity.is_empty())
+                        .map(str::to_string);
+                    Some(PageItem { index, label, identity })
                 } else {
                     None
                 }
@@ -400,7 +458,11 @@ const LIST_JS: &str = r#"(() => {
       const name = (el.getAttribute('aria-label') || el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 180);
       if (!name || name.length < 8 || bad.test(name)) continue;
       el.setAttribute('data-dayloop', String(items.length));
-      items.push(name);
+      const link = el.querySelector('a[href]');
+      const href = link && link.getAttribute('href');
+      const identity = el.getAttribute('data-item-id') || el.getAttribute('data-message-id') ||
+        el.getAttribute('data-id') || (href && href !== '#' && !href.startsWith('javascript:') ? href : '') || '';
+      items.push({ label: name, identity: identity.slice(0, 512) });
       if (items.length >= 8) break;
     }
     if (items.length >= 8) break;
@@ -420,6 +482,40 @@ const READ_JS: &str = r#"(() => {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestHome {
+        dir: std::path::PathBuf,
+        previous: Option<String>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let lock = HOME_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+            let dir = std::env::temp_dir().join(format!("dayloop-browse-{}", ulid::Ulid::new()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let previous = std::env::var("DAYLOOP_HOME").ok();
+            std::env::set_var("DAYLOOP_HOME", &dir);
+            Self { dir, previous, _lock: lock }
+        }
+
+        fn store(&self) -> Store {
+            Store::open().unwrap()
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("DAYLOOP_HOME", value),
+                None => std::env::remove_var("DAYLOOP_HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
 
     #[test]
     fn send_and_delete_are_not_choices() {
@@ -433,9 +529,9 @@ mod tests {
             "https://dev.azure.com/pcedx/pcedx-1/_workitems/recentlyupdated/"
         );
         let picker = vec![
-            PageItem { index: 0, label: "English".into() },
-            PageItem { index: 1, label: "Deutsch".into() },
-            PageItem { index: 2, label: "日本語".into() },
+            PageItem { index: 0, label: "English".into(), identity: None },
+            PageItem { index: 1, label: "Deutsch".into(), identity: None },
+            PageItem { index: 2, label: "日本語".into(), identity: None },
         ];
         assert!(is_language_picker(&picker));
         assert_eq!(subject_line("田中 見積の確認 - 明日まで"), "田中 見積の確認");
@@ -448,7 +544,29 @@ mod tests {
         ));
         assert!(!keep_message(&JevOutcome::Unavailable, "ニュースレター", &["お願い".into()]));
         assert!(keep_message(&JevOutcome::Unavailable, "お願い 確認", &["お願い".into()]));
-        let items = vec![PageItem { index: 0, label: "見積の確認".into() }];
+        let items = vec![PageItem { index: 0, label: "見積の確認".into(), identity: None }];
         assert_eq!(choices(&items), vec!["open:0".to_string(), "stop".to_string()]);
+    }
+
+    #[test]
+    fn changed_content_gets_a_distinct_candidate_and_repeat_deduplicates() {
+        let home = TestHome::new();
+        let store = home.store();
+        let subject = "定例資料の確認";
+        let body_a = "来週の定例資料を確認してください";
+        let body_b = "今月の請求一覧を確認してください";
+        let id_a = item_identity(Some("shared-thread"), subject, body_a).unwrap();
+        let id_b = item_identity(Some("shared-thread"), subject, body_b).unwrap();
+
+        assert!(save_one(&store, "gmail", subject, body_a, Some(&id_a)).unwrap());
+        assert!(save_one(&store, "gmail", subject, body_b, Some(&id_b)).unwrap());
+        assert!(!save_one(&store, "gmail", subject, "来週の定例資料を  確認してください", Some(&id_a)).unwrap());
+
+        let candidates = store.open_candidates().unwrap();
+        assert_eq!(candidates.len(), 2);
+        let refs: Vec<_> = candidates.iter().filter_map(|candidate| candidate.source_ref.as_deref()).collect();
+        assert_eq!(refs.len(), 2);
+        assert_ne!(refs[0], refs[1]);
+        assert!(refs.iter().all(|source_ref| !source_ref.contains(body_a) && !source_ref.contains(body_b)));
     }
 }
