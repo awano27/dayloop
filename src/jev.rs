@@ -255,7 +255,10 @@ fn grow_tasks(
         if protected.contains(&t.id) { continue; }
         let sit = Situation::from_task(&t, "close");
         if let Some(edge) = graph::resolve(store, &sit)? {
-            if matches!(edge.to_choice.as_str(), "done" | "start" | "not_done" | "carry" | "drop") {
+            if !graph::can_reuse_automatic_task_choice(&edge) {
+                continue;
+            }
+            if matches!(edge.to_choice.as_str(), "start" | "not_done" | "carry" | "drop") {
                 store.revise_task(&t.id, &edge.to_choice, edge.reason_code.as_deref())?;
                 n += 1;
                 continue;

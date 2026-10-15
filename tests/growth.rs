@@ -34,6 +34,11 @@ impl Home {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "[jev]\nmode = \"off\"\n[intake]\noutlook = false\n[observe]\nfixture = \"\"\n",
+        )
+        .unwrap();
         unsafe {
             std::env::set_var("DAYLOOP_HOME", &dir);
         }
@@ -225,7 +230,7 @@ fn conflicting_sender_does_not_auto_decide_a_new_subject() {
 }
 
 #[test]
-fn unknown_title_asks_jev_once_then_the_edge_applies() {
+fn unknown_title_asks_jev_once_then_known_done_stays_pending() {
     let home = Home::new();
     let store = home.store();
     store
@@ -253,8 +258,66 @@ fn unknown_title_asks_jev_once_then_the_edge_applies() {
     assert_eq!(jev.calls, 1);
     assert_eq!(
         store.tasks_for_day("2026-09-02").unwrap()[0].state,
-        State::Done
+        State::Planned
     );
+}
+
+#[test]
+fn known_done_edge_keeps_same_normalized_title_pending_in_grow() {
+    let home = Home::new();
+    let store = home.store();
+    let first = store.add_task(
+        "  新しい   調査 ",
+        None,
+        None,
+        "manual",
+        Some("fixture:first"),
+        Some("2026-09-01"),
+    ).unwrap();
+    store.revise_task(&first.id, "done", None).unwrap();
+    let second = store.add_task(
+        "新しい 調査",
+        None,
+        None,
+        "manual",
+        Some("fixture:second"),
+        Some("2026-09-02"),
+    ).unwrap();
+    drop(store);
+    let store = home.store();
+    let sit = Situation::from_task(&store.get_task(&second.id).unwrap(), "close");
+    let saved_edge = graph::resolve(&store, &sit).unwrap().unwrap();
+    assert_eq!(saved_edge.to_choice, "done");
+    assert_eq!(graph::apply_known_tasks(&store, "2026-09-02").unwrap(), 0);
+    assert_eq!(store.get_task(&second.id).unwrap().state, State::Planned);
+    assert_eq!(graph::resolve(&store, &sit).unwrap().unwrap().id, saved_edge.id);
+    let mut measured_jev = Scripted {
+        choice: "done".into(),
+        confidence: 0.99,
+        calls: 0,
+        down: false,
+    };
+    assert_eq!(
+        jev::apply_if_measured(&store, "2026-09-02", &mut measured_jev, Some(0.5)).unwrap(),
+        0
+    );
+    assert_eq!(measured_jev.calls, 0);
+    assert_eq!(store.get_task(&second.id).unwrap().state, State::Planned);
+    let mut jev = Scripted {
+        choice: "done".into(),
+        confidence: 0.99,
+        calls: 0,
+        down: false,
+    };
+
+    let applied = jev::grow(&store, "2026-09-02", &mut jev, 0.5).unwrap();
+
+    assert_eq!(applied, 0);
+    assert_eq!(jev.calls, 0, "known done must not fall through to Jev");
+    assert_eq!(store.get_task(&first.id).unwrap().state, State::Done);
+    assert_eq!(store.get_task(&second.id).unwrap().state, State::Planned);
+    assert_eq!(store.get_task(&second.id).unwrap().closed_at, None);
+    assert_eq!(graph::resolve(&store, &sit).unwrap().unwrap().id, saved_edge.id);
 }
 
 #[test]

@@ -418,6 +418,11 @@ fn apply_task_choice(store: &Store, t: &Task, edge: &Learned) -> Result<bool> {
     Ok(applied)
 }
 
+/// A learned task completion is history, not permission to close another task.
+pub(crate) fn can_reuse_automatic_task_choice(edge: &Learned) -> bool {
+    edge.to_choice != "done"
+}
+
 pub fn apply_known_tasks(store: &Store, date: &str) -> Result<usize> {
     let protected = crate::commitment::protected_task_ids(store)?;
     let ids: Vec<String> = store
@@ -436,6 +441,9 @@ pub fn apply_known_tasks(store: &Store, date: &str) -> Result<usize> {
         let Some(edge) = resolve(store, &sit)? else {
             continue;
         };
+        if !can_reuse_automatic_task_choice(&edge) {
+            continue;
+        }
         if apply_task_choice(store, &t, &edge)? {
             n += 1;
         }
