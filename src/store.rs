@@ -222,6 +222,12 @@ impl Store {
         self.transaction(rusqlite::TransactionBehavior::Deferred, f)
     }
 
+    /// Serialize a journal's open-day check and filesystem write with closure,
+    /// including in WAL mode where a read snapshot does not block writers.
+    pub(crate) fn journal_refresh<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.transaction(rusqlite::TransactionBehavior::Immediate, f)
+    }
+
     fn query_tasks(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<Task>> {
         let mut st = self.conn.prepare(sql)?;
         let rows = st.query_map(p, row_to_task)?;
@@ -320,6 +326,19 @@ impl Store {
     /// Shared CLI/MCP closure decision. Later confirmations never change a
     /// historical closed_at, and they remain visible even when closed=true.
     pub fn close_day_status(&self, date: &str) -> Result<DayCloseStatus> {
+        self.close_day_with(date, || Ok(()))
+    }
+
+    /// Application closure includes the final journal. A write failure leaves
+    /// the day open so the same close operation can be retried.
+    pub fn close_day_with_journal(&self, date: &str) -> Result<DayCloseStatus> {
+        self.close_day_with(date, || {
+            crate::markdown::export(self, date)?;
+            Ok(())
+        })
+    }
+
+    fn close_day_with(&self, date: &str, write_journal: impl FnOnce() -> Result<()>) -> Result<DayCloseStatus> {
         self.transaction(rusqlite::TransactionBehavior::Immediate, || {
             let mut status = self.close_state(date)?;
             if !status.closed && status.pending_count() == 0 {
@@ -328,13 +347,15 @@ impl Store {
                 self.conn.execute("UPDATE days SET closed_at=?2 WHERE date=?1 AND closed_at IS NULL",params![date,closed_at])?;
                 status.closed = true;
                 status.closed_at = Some(closed_at);
+                write_journal()?;
             }
             Ok(status)
         })
     }
 
     /// Compatibility for internal callers interested only in historical closure.
-    /// Rituals and MCP use close_day_status to also expose current confirmations.
+    /// Rituals and MCP use close_day_with_journal to also write the final journal
+    /// and expose current confirmations.
     pub fn close_day(&self, date: &str) -> Result<std::result::Result<(), Vec<Task>>> {
         let status = self.close_day_status(date)?;
         if status.closed {

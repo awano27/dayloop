@@ -30,6 +30,22 @@ const REQUIRED_TOOLS: &[&str] = &[
     "sync_sources",
 ];
 
+fn isolated_command(home: &std::path::Path) -> Command {
+    std::fs::write(
+        home.join("config.toml"),
+        "[jev]\nmode = \"off\"\n[intake]\noutlook = false\n",
+    )
+    .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dayloop"));
+    command.env_clear().env("DAYLOOP_HOME", home).env("PATH", "");
+    for name in ["SystemRoot", "WINDIR", "TEMP", "TMP"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
+}
+
 fn frame(v: &Value) -> Vec<u8> {
     let s = serde_json::to_string(v).unwrap();
     format!("{s}\n").into_bytes()
@@ -86,7 +102,7 @@ fn mcp_initialize_list_add_and_close_stays_open() {
     ));
     std::fs::create_dir_all(&home).unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_dayloop"))
+    let mut child = isolated_command(&home)
         .arg("mcp")
         .env("DAYLOOP_HOME", &home)
         .stdin(Stdio::piped())
@@ -210,7 +226,7 @@ fn mcp_carry_over_returns_carry_blocked_not_exception() {
     ));
     std::fs::create_dir_all(&home).unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_dayloop"))
+    let mut child = isolated_command(&home)
         .arg("mcp")
         .env("DAYLOOP_HOME", &home)
         .stdin(Stdio::piped())
@@ -254,7 +270,7 @@ fn mcp_carry_over_returns_carry_blocked_not_exception() {
 
     let dates = ["2026-09-02", "2026-09-03", "2026-09-04"];
     for (i, to) in dates.iter().enumerate() {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_dayloop"))
+        let mut child = isolated_command(&home)
             .arg("mcp")
             .env("DAYLOOP_HOME", &home)
             .stdin(Stdio::piped())
@@ -291,7 +307,7 @@ fn mcp_carry_over_returns_carry_blocked_not_exception() {
         id = body["id"].as_str().unwrap().to_string();
     }
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_dayloop"))
+    let mut child = isolated_command(&home)
         .arg("mcp")
         .env("DAYLOOP_HOME", &home)
         .stdin(Stdio::piped())
@@ -343,7 +359,7 @@ fn mcp_close_day_options_are_structured() {
     ));
     std::fs::create_dir_all(&home).unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_dayloop"))
+    let mut child = isolated_command(&home)
         .arg("mcp")
         .env("DAYLOOP_HOME", &home)
         .stdin(Stdio::piped())
@@ -456,8 +472,11 @@ fn mcp_sync_sources_partial_failure_is_not_error() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(home.join("inbox")).unwrap();
+    std::fs::write(home.join("inbox/broken.txt"), [0xff, 0xfe]).unwrap();
+    std::fs::write(home.join("inbox/good.txt"), "Action items\n- Prepare synthetic estimate\n").unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_dayloop"))
+    let mut child = isolated_command(&home)
         .arg("mcp")
         .env("DAYLOOP_HOME", &home)
         .stdin(Stdio::piped())
@@ -503,9 +522,117 @@ fn mcp_sync_sources_partial_failure_is_not_error() {
     let body = tool_text(&frames[2]);
     assert!(body.get("sources").is_some(), "{body}");
     let src0 = &body["sources"][0];
-    assert_eq!(src0["name"], "outlook");
+    assert_eq!(src0["name"], "minutes");
     assert_eq!(src0["ok"], false);
+    assert_eq!(src0["status"], "partial");
+    assert_eq!(src0["candidates_added"], 1);
+    assert_eq!(src0["files_processed"], 1);
+    assert_eq!(src0["files_failed"], 1);
     assert!(!body["errors"].as_array().unwrap().is_empty());
+    assert!(body["errors"][0]["error"].as_str().unwrap().contains("read"));
+    let retry = sync_sources(&home);
+    assert_eq!(retry["sources"][0]["status"], "partial");
+    assert_eq!(retry["sources"][0]["candidates_added"], 0);
+    assert_eq!(retry["sources"][0]["candidates_skipped"], 1);
+    let db = rusqlite::Connection::open(home.join("dayloop.db")).unwrap();
+    let count: i64 = db.query_row("SELECT count(*) FROM candidates", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 1);
+    let statuses: Vec<String> = db.prepare("SELECT status FROM commitment_syncs WHERE source='minutes'").unwrap()
+        .query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(statuses, vec!["partial", "partial"]);
+    drop(db);
 
     let _ = std::fs::remove_dir_all(&home);
+}
+
+fn sync_sources(home: &std::path::Path) -> Value {
+    let mut child = isolated_command(home)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for request in [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"isolated-test","version":"0"}}}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sync_sources","arguments":{}}}),
+    ] {
+        stdin.write_all(&frame(&request)).unwrap();
+    }
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let frames = parse_frames(&output.stdout);
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[1]["result"]["isError"], false);
+    tool_text(&frames[1])
+}
+
+#[test]
+fn mcp_sync_distinguishes_unconfigured_zero_and_read_failure() {
+    let home = std::env::temp_dir().join(format!("dayloop-sync-states-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&home).unwrap();
+    let skipped = sync_sources(&home);
+    assert_eq!(skipped["sources"], json!([]));
+    assert_eq!(skipped["errors"], json!([]));
+
+    std::fs::create_dir_all(home.join("inbox")).unwrap();
+    let zero = sync_sources(&home);
+    assert_eq!(zero["sources"][0]["name"], "minutes");
+    assert_eq!(zero["sources"][0]["ok"], true);
+    assert_eq!(zero["sources"][0]["status"], "success");
+    assert_eq!(zero["sources"][0]["candidates_added"], 0);
+    assert_eq!(zero["errors"], json!([]));
+
+    std::fs::write(home.join("inbox/broken.txt"), [0xff]).unwrap();
+    let failed = sync_sources(&home);
+    assert_eq!(failed["sources"][0]["name"], "minutes");
+    assert_eq!(failed["sources"][0]["ok"], false);
+    assert_eq!(failed["sources"][0]["status"], "failed");
+    assert_eq!(failed["sources"][0]["candidates_added"], 0);
+    assert_eq!(failed["sources"][0]["files_failed"], 1);
+    assert!(!failed["errors"].as_array().unwrap().is_empty());
+
+    let cli = isolated_command(&home).args(["check", "--date", "2026-10-01", "--yes"]).output().unwrap();
+    let stdout = String::from_utf8(cli.stdout).unwrap();
+    assert!(stdout.contains("minutes"), "{stdout}");
+    assert!(stdout.contains("read"), "{stdout}");
+    assert!(!stdout.contains("skipped"), "an attempted failure is not unconfigured: {stdout}");
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn mcp_sync_reports_candidate_and_ledger_storage_failures_together() {
+    let home = std::env::temp_dir().join(format!("dayloop-sync-store-{}", ulid::Ulid::new()));
+    std::fs::create_dir_all(&home).unwrap();
+    sync_sources(&home);
+    std::fs::create_dir_all(home.join("inbox")).unwrap();
+    std::fs::write(home.join("inbox/good.txt"), "Action items\n- synthetic secret body\n").unwrap();
+    let db = rusqlite::Connection::open(home.join("dayloop.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_candidate BEFORE INSERT ON candidates BEGIN SELECT RAISE(ABORT, 'synthetic secret storage text'); END;",
+    ).unwrap();
+    let failed = sync_sources(&home);
+    assert_eq!(failed["sources"][0]["name"], "minutes");
+    assert_eq!(failed["sources"][0]["status"], "failed");
+    assert_eq!(failed["sources"][0]["candidates_added"], 0);
+    assert!(failed["errors"][0]["error"].as_str().unwrap().contains("store"));
+    let status: String = db.query_row("SELECT status FROM commitment_syncs WHERE source='minutes'", [], |row| row.get(0)).unwrap();
+    assert_eq!(status, "failed");
+
+    db.execute_batch(
+        "CREATE TRIGGER fail_sync BEFORE INSERT ON commitment_syncs BEGIN SELECT RAISE(ABORT, 'synthetic secret ledger text'); END;",
+    ).unwrap();
+    let failed = sync_sources(&home);
+    let error = failed["errors"][0]["error"].as_str().unwrap();
+    assert!(error.contains("store"), "{error}");
+    assert!(error.contains("sync_record"), "{error}");
+    assert!(!failed.to_string().contains("synthetic secret"), "{failed}");
+    assert_eq!(failed["sources"][0]["candidates_added"], 0);
+    let count: i64 = db.query_row("SELECT count(*) FROM candidates", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 0);
+    drop(db);
+    let _ = std::fs::remove_dir_all(home);
 }

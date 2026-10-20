@@ -466,7 +466,7 @@ pub fn close_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
             },
         }
     }
-    let status = store.close_day_status(date)?;
+    let status = store.close_day_with_journal(date)?;
     let pending = status.pending_count();
     println!();
     if status.already_closed {
@@ -490,7 +490,10 @@ pub fn plan_ritual(store: &Store, ui: &Ui, date: &str) -> Result<Outcome> {
         if store.open_tasks_for_day(&d)?.is_empty()
             && crate::commitment::due_count(store, &crate::commitment::day_cutoff(&d)?)? == 0
         {
-            let _ = store.close_day(&d)?;
+            let status = store.close_day_with_journal(&d)?;
+            if status.pending_count() > 0 {
+                return Ok(Outcome::Pending(status.pending_count()));
+            }
             continue;
         }
         println!("!! {d} が未確定のままです。先に確定します。");

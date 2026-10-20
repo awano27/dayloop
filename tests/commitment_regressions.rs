@@ -27,28 +27,16 @@ impl Home {
 
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dayloop"));
+        command.env_clear();
+        for key in ["SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
         command
             .env("DAYLOOP_HOME", &self.0)
             .env("PATH", "")
             .stdin(Stdio::null());
-        for key in [
-            "TYPESAFE_API_KEY",
-            "DAYLOOP_JEV_API_KEY",
-            "DAYLOOP_LINK_LIVE",
-            "GITHUB_TOKEN",
-            "GH_TOKEN",
-            "JIRA_BASE_URL",
-            "JIRA_EMAIL",
-            "JIRA_API_TOKEN",
-            "TEAMS_TOKEN",
-            "GRAPH_TOKEN",
-            "AZURE_DEVOPS_ORG",
-            "AZURE_DEVOPS_PAT",
-            "ADO_PAT",
-            "DAYLOOP_INTERACTIVE",
-        ] {
-            command.env_remove(key);
-        }
         command
     }
 
@@ -643,4 +631,188 @@ fn changing_the_displayed_task_order_invalidates_the_confirmation() {
         "confirm_plan",
         &json!({"date":date,"plan_revision":changed["plan_revision"]}),
     ));
+}
+
+fn journal_path(home: &Home, date: &str) -> PathBuf {
+    home.0.join("days").join(format!("{date}.md"))
+}
+
+fn interactive_plan(home: &Home, date: &str, answers: &[u8]) -> std::process::Output {
+    let mut child = home
+        .command()
+        .env("DAYLOOP_INTERACTIVE", "1")
+        .args(["plan", "--date", date])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(answers).unwrap();
+    drop(child.stdin.take());
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn journal_closed_check_and_reclose_preserve_hand_edits_and_pending_questions() {
+    let home = Home::new();
+    ok(home.tool("close_day", &json!({"date":PAST_DAY})));
+    let path = journal_path(&home, PAST_DAY);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(b"\nHand-written historical note\n");
+    std::fs::write(&path, &bytes).unwrap();
+    let state = home.day_state(PAST_DAY);
+    ok(home.tool(
+        "add_candidate",
+        &json!({"title":"Late candidate","source":"fixture"}),
+    ));
+    home.register("late-journal-promise", PAST_DAY);
+    for verb in ["check", "close"] {
+        let output = home.ritual(verb, PAST_DAY, true);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Review this promise"));
+        assert_eq!(home.day_state(PAST_DAY), state);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "{verb} rewrote history"
+        );
+    }
+    let view = ok(home.tool("check_in", &json!({"date":PAST_DAY})));
+    assert!(!view["questions"].as_array().unwrap().is_empty());
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
+#[test]
+fn journal_plan_exports_each_first_closed_previous_day() {
+    let home = Home::new();
+    for date in ["2026-10-01", PAST_DAY] {
+        ok(home.tool(
+            "add_task",
+            &json!({"title":format!("Finish {date}"),"date":date}),
+        ));
+        assert!(std::fs::read_to_string(journal_path(&home, date))
+            .unwrap()
+            .contains("クローズ: 未"));
+    }
+    let output = interactive_plan(&home, "2026-10-04", b"1\n1\n1\n");
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for date in ["2026-10-01", PAST_DAY] {
+        assert!(home.day_state(date).1.is_some());
+        let journal = std::fs::read_to_string(journal_path(&home, date)).unwrap();
+        assert!(
+            journal.contains(&format!("- [x] Finish {date}")),
+            "{journal}"
+        );
+        assert!(!journal.contains("クローズ: 未"), "{journal}");
+    }
+}
+
+#[test]
+fn journal_plan_closes_already_resolved_day_and_leaves_unanswered_day_open() {
+    let home = Home::new();
+    let task = ok(home.tool(
+        "add_task",
+        &json!({"title":"Resolved task","date":PAST_DAY}),
+    ));
+    ok(home.tool("finish_task", &json!({"id":task["id"]})));
+    let output = home.ritual("plan", "2026-10-04", true);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(home.day_state(PAST_DAY).1.is_some());
+    assert!(!std::fs::read_to_string(journal_path(&home, PAST_DAY))
+        .unwrap()
+        .contains("クローズ: 未"));
+    let other = Home::new();
+    ok(other.tool(
+        "add_task",
+        &json!({"title":"Unanswered task","date":PAST_DAY}),
+    ));
+    assert_eq!(
+        other.ritual("plan", "2026-10-04", true).status.code(),
+        Some(2)
+    );
+    assert!(other.day_state(PAST_DAY).1.is_none());
+    let today = ok(other.tool("get_today", &json!({"date":"2026-10-04"})));
+    assert!(today["day"]["plan_confirmed_at"].is_null());
+}
+
+#[test]
+fn journal_first_close_write_failure_rolls_back_and_can_retry_cli_and_mcp() {
+    for mcp in [false, true] {
+        let home = Home::new();
+        ok(home.tool("get_today", &json!({"date":PAST_DAY})));
+        let path = journal_path(&home, PAST_DAY);
+        std::fs::create_dir(&path).unwrap();
+        if mcp {
+            assert!(home
+                .tool("close_day", &json!({"date":PAST_DAY}))
+                .get("error")
+                .is_some());
+        } else {
+            assert!(!home.ritual("close", PAST_DAY, true).status.success());
+        }
+        let failed = ok(home.tool("get_today", &json!({"date":PAST_DAY})));
+        assert!(
+            failed["day"]["closed_at"].is_null(),
+            "failed journal write must not commit closure"
+        );
+        std::fs::remove_dir(&path).unwrap();
+        if mcp {
+            ok(home.tool("close_day", &json!({"date":PAST_DAY})));
+        } else {
+            assert!(home.ritual("close", PAST_DAY, true).status.success());
+        }
+        assert!(home.day_state(PAST_DAY).1.is_some());
+        assert!(!std::fs::read_to_string(path)
+            .unwrap()
+            .contains("クローズ: 未"));
+    }
+}
+
+#[test]
+fn journal_plan_write_failure_blocks_today_and_retry_finishes_previous_day() {
+    let home = Home::new();
+    ok(home.tool(
+        "add_task",
+        &json!({"title":"Finish before planning","date":PAST_DAY}),
+    ));
+    let path = journal_path(&home, PAST_DAY);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let failed = interactive_plan(&home, "2026-10-04", b"1\n1\n");
+    assert!(!failed.status.success());
+    assert!(home.day_state(PAST_DAY).1.is_none());
+    let today = ok(home.tool("get_today", &json!({"date":"2026-10-04"})));
+    assert!(today["day"]["plan_confirmed_at"].is_null());
+    std::fs::remove_dir(&path).unwrap();
+    let retry = interactive_plan(&home, "2026-10-04", b"1\n");
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let journal = std::fs::read_to_string(path).unwrap();
+    assert!(journal.contains("- [x] Finish before planning"));
+    assert!(!journal.contains("クローズ: 未"));
+}
+
+#[test]
+fn journal_explicit_export_can_refresh_a_closed_day() {
+    let home = Home::new();
+    ok(home.tool("close_day", &json!({"date":PAST_DAY})));
+    ok(home.tool(
+        "add_candidate",
+        &json!({"title":"Explicitly exported candidate","source":"fixture"}),
+    ));
+    let state = home.day_state(PAST_DAY);
+    assert!(home.ritual("export", PAST_DAY, true).status.success());
+    assert!(std::fs::read_to_string(journal_path(&home, PAST_DAY))
+        .unwrap()
+        .contains("Explicitly exported candidate"));
+    ok(home.tool("export_markdown", &json!({"date":PAST_DAY})));
+    assert_eq!(home.day_state(PAST_DAY), state);
 }

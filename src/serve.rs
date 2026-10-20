@@ -158,7 +158,7 @@ fn execute(phase: Phase, date: &str) -> Result<Outcome> {
         Phase::Close => rituals::close_ritual(&store, &ui, date)?,
         Phase::Retro => rituals::retro_ritual(&store, &ui, date)?,
     };
-    if let Err(e) = crate::markdown::export(&store, date) {
+    if let Err(e) = crate::markdown::export_if_open(&store, date) {
         log_event(&format!("markdown export: {e}"));
     }
     Ok(out)

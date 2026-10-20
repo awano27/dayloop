@@ -7,6 +7,17 @@ use crate::paths;
 use crate::store::{Store, CANDIDATE_STALE_DAYS};
 use crate::util::{days_since, hhmm};
 
+/// Routine refreshes preserve historical journals, including hand edits.
+/// Explicit export and first closure deliberately use `export` instead.
+pub fn export_if_open(store: &Store, date: &str) -> Result<()> {
+    store.journal_refresh(|| {
+        if store.get_day(date)?.and_then(|day| day.closed_at).is_none() {
+            export(store, date)?;
+        }
+        Ok(())
+    })
+}
+
 pub fn export(store: &Store, date: &str) -> Result<std::path::PathBuf> {
     let day = store.get_day(date)?;
     let tasks = store.tasks_for_day(date)?;

@@ -39,35 +39,58 @@ pub struct SyncResult {
     pub candidates_added: usize,
     pub candidates_skipped: usize,
     pub events: usize,
+    pub files_processed: usize,
+    pub files_failed: usize,
     pub error: Option<String>,
 }
 
 impl SyncResult {
-    pub fn summary_line(&self) -> String {
-        if !self.ok {
-            return format!(
-                "Outlook デスクトップが利用できません: {}",
-                self.error.as_deref().unwrap_or("unknown")
-            );
+    /// Operational outcome; source coverage remains independently conservative.
+    pub fn status(&self) -> &'static str {
+        if self.ok {
+            "success"
+        } else if self.candidates_added
+            + self.candidates_skipped
+            + self.events
+            + self.files_processed
+            > 0
+        {
+            "partial"
+        } else {
+            "failed"
         }
+    }
+
+    pub fn summary_line(&self) -> String {
         format!(
-            "候補 +{}（重複 {}）、予定 {} 件",
-            self.candidates_added, self.candidates_skipped, self.events
+            "{} {}: 候補 +{}（重複 {}）、予定 {} 件、ファイル成功 {} / 失敗 {}{}",
+            self.name,
+            self.status(),
+            self.candidates_added,
+            self.candidates_skipped,
+            self.events,
+            self.files_processed,
+            self.files_failed,
+            self.error
+                .as_ref()
+                .map(|e| format!("; {e}"))
+                .unwrap_or_default()
         )
     }
 
     pub fn serve_line(&self) -> String {
-        if self.ok {
-            format!(
-                "intake {} ok +{} cand, {} events",
-                self.name, self.candidates_added, self.events
-            )
-        } else {
-            format!(
-                "intake {} skipped: {}",
-                self.name,
-                self.error.as_deref().unwrap_or("unknown")
-            )
+        format!("intake {}", self.summary_line())
+    }
+
+    fn fail(&mut self, stage: &str, detail: &str) {
+        self.ok = false;
+        let message = format!("{stage}: {detail}");
+        match &mut self.error {
+            Some(error) => {
+                error.push_str("; ");
+                error.push_str(&message);
+            }
+            None => self.error = Some(message),
         }
     }
 }
@@ -152,7 +175,7 @@ pub fn ingest(
             continue;
         }
         store.upsert_events(&ds, evs)?;
-        markdown::export(store, &ds)?;
+        markdown::export_if_open(store, &ds)?;
     }
 
     if !dry_run {
@@ -167,6 +190,8 @@ pub fn ingest(
         candidates_added: added,
         candidates_skipped: skipped,
         events: event_count,
+        files_processed: 0,
+        files_failed: 0,
         error: None,
     })
 }
@@ -196,6 +221,8 @@ pub fn run_outlook(store: &Store, cfg: &Config, since: Option<&str>, dry_run: bo
                 candidates_added: 0,
                 candidates_skipped: 0,
                 events: 0,
+                files_processed: 0,
+                files_failed: 0,
                 error: Some(e.to_string()),
             };
         }
@@ -209,6 +236,8 @@ pub fn run_outlook(store: &Store, cfg: &Config, since: Option<&str>, dry_run: bo
             candidates_added: 0,
             candidates_skipped: 0,
             events: 0,
+            files_processed: 0,
+            files_failed: 0,
             error: Some(e.to_string()),
         },
     }
@@ -227,7 +256,16 @@ pub fn run_fixture(store: &Store, dir: &std::path::Path, cfg: &Config) -> Result
     let src = match FixtureSource::load(dir) {
         Ok(source) => source,
         Err(error) => {
-            let failed = SyncResult { name:"fixture".into(), ok:false, candidates_added:0, candidates_skipped:0, events:0, error:Some(error.to_string()) };
+            let failed = SyncResult {
+                name: "fixture".into(),
+                ok: false,
+                candidates_added: 0,
+                candidates_skipped: 0,
+                events: 0,
+                files_processed: 0,
+                files_failed: 0,
+                error: Some(error.to_string()),
+            };
             record_sync(store, &failed, "failed")?;
             return Err(error);
         }
@@ -236,7 +274,16 @@ pub fn run_fixture(store: &Store, dir: &std::path::Path, cfg: &Config) -> Result
     let mut result = match ingest(store, &src, &intake, since, Local::now(), false) {
         Ok(result) => result,
         Err(error) => {
-            let failed = SyncResult { name:"fixture".into(), ok:false, candidates_added:0, candidates_skipped:0, events:0, error:Some(error.to_string()) };
+            let failed = SyncResult {
+                name: "fixture".into(),
+                ok: false,
+                candidates_added: 0,
+                candidates_skipped: 0,
+                events: 0,
+                files_processed: 0,
+                files_failed: 0,
+                error: Some(error.to_string()),
+            };
             record_sync(store, &failed, "partial")?;
             return Err(error);
         }
@@ -293,11 +340,7 @@ pub fn sync_all(store: &Store, cfg: &Config) -> Vec<SyncResult> {
     for result in &mut out {
         // Existing adapters may cap their result set. Success does not prove
         // complete coverage of replies or changes.
-        let status = if result.ok { "partial" } else { "failed" };
-        if let Err(error) = record_sync(store, result, status) {
-            result.ok = false;
-            result.error = Some(format!("同期記録の保存に失敗: {error}"));
-        }
+        record_result(store, result);
     }
     out
 }
@@ -311,8 +354,9 @@ fn record_sync(store: &Store, result: &SyncResult, status: &str) -> Result<()> {
             "source": result.name,
             "status": status,
             "at": chrono::Utc::now().to_rfc3339(),
-            "evidence": format!("候補追加={},重複={},予定={},取得範囲の完全性={},詳細={}",
+            "evidence": format!("候補追加={},重複={},予定={},ファイル成功={},ファイル失敗={},取得範囲の完全性={},詳細={}",
                 result.candidates_added, result.candidates_skipped, result.events,
+                result.files_processed, result.files_failed,
                 if status == "success" { "fixture範囲内" } else { "未確認" },
                 result.error.as_deref().unwrap_or("adapter returned")),
         }),
@@ -320,43 +364,165 @@ fn record_sync(store: &Store, result: &SyncResult, status: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_devops(store: &Store) -> Option<SyncResult> {
-    if crate::devops::org().is_none() {
+#[derive(Default)]
+pub(super) struct BatchCounts {
+    added: usize,
+    skipped: usize,
+}
+
+/// Each fetched batch commits completely or leaves no candidate writes.
+pub(super) fn ingest_candidates<'a>(
+    store: &Store,
+    source: &str,
+    items: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<BatchCounts> {
+    let tx = store.connection().unchecked_transaction()?;
+    let mut counts = BatchCounts::default();
+    for (title, source_ref) in items {
+        if store
+            .add_candidate(title, source, Some(source_ref))?
+            .is_some()
+        {
+            counts.added += 1;
+        } else {
+            counts.skipped += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(counts)
+}
+
+fn run_adapter<T>(
+    name: &str,
+    configured: bool,
+    fetch: impl FnOnce() -> Result<T>,
+    ingest: impl FnOnce(T) -> Result<BatchCounts>,
+) -> Option<SyncResult> {
+    if !configured {
         return None;
     }
-    match crate::devops::fetch_assigned() {
-        Ok(items) => devops_live::ingest(store, &items)
-            .ok()
-            .map(|n| counted("devops", n)),
-        Err(e) => Some(SyncResult {
-            name: "devops".into(),
-            ok: false,
-            candidates_added: 0,
-            candidates_skipped: 0,
-            events: 0,
-            error: Some(e.to_string()),
-        }),
+    let mut result = counted(name, 0);
+    match fetch() {
+        Ok(items) => match ingest(items) {
+            Ok(counts) => {
+                result.candidates_added = counts.added;
+                result.candidates_skipped = counts.skipped;
+            }
+            Err(error) => result.fail(
+                "store",
+                &format!(
+                    "candidate batch failed; rolled back ({})",
+                    safe_error_kind(&error)
+                ),
+            ),
+        },
+        // Provider errors may contain tokens, response bodies or URLs.
+        Err(_) => result.fail("fetch", "source retrieval failed"),
+    }
+    Some(result)
+}
+
+/// Include only machine error categories, never SQL, paths, response bodies or credentials.
+fn safe_error_kind(error: &anyhow::Error) -> String {
+    for cause in error.chain() {
+        if let Some(rusqlite::Error::SqliteFailure(code, _)) =
+            cause.downcast_ref::<rusqlite::Error>()
+        {
+            return format!("sqlite:{:?}", code.code);
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return format!("io:{:?}", io.kind());
+        }
+    }
+    "validation_or_storage_error".into()
+}
+
+fn record_result(store: &Store, result: &mut SyncResult) {
+    persist_result(result, |result, status| record_sync(store, result, status));
+}
+
+fn persist_result(result: &mut SyncResult, save: impl FnOnce(&SyncResult, &str) -> Result<()>) {
+    let status = if result.ok || result.status() == "partial" {
+        "partial"
+    } else {
+        "failed"
+    };
+    if let Err(error) = save(result, status) {
+        result.fail(
+            "sync_record",
+            &format!(
+                "synchronization record could not be saved ({})",
+                safe_error_kind(&error)
+            ),
+        );
     }
 }
 
-fn run_inbox(store: &Store) -> Option<SyncResult> {
+fn run_devops(store: &Store) -> Option<SyncResult> {
+    run_adapter(
+        "devops",
+        crate::devops::org().is_some(),
+        crate::devops::fetch_assigned,
+        |items| devops_live::ingest_report(store, &items),
+    )
+}
+
+/// Read the configured inbox without contacting any external service.
+pub fn run_inbox(store: &Store) -> Option<SyncResult> {
     let dir = crate::paths::inbox_dir();
-    if !dir.is_dir() {
-        return None;
+    match std::fs::symlink_metadata(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        _ => {}
     }
-    let mut added = 0usize;
-    let entries = std::fs::read_dir(&dir).ok()?;
-    for entry in entries.flatten() {
+    let mut result = counted("minutes", 0);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            result.fail(
+                "enumerate",
+                &format!("inbox directory unavailable ({:?})", e.kind()),
+            );
+            return Some(result);
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                result.fail(
+                    "enumerate",
+                    &format!("inbox entry unavailable ({:?})", e.kind()),
+                );
+                continue;
+            }
+        };
         let path = entry.path();
-        if !path.is_file() {
-            continue;
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => continue,
+            Err(e) => {
+                result.files_failed += 1;
+                result.fail(
+                    "read",
+                    &format!("file metadata unavailable ({:?})", e.kind()),
+                );
+                continue;
+            }
         }
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         if !matches!(ext, "txt" | "md" | "html" | "htm") {
             continue;
         }
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            continue;
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) => {
+                result.files_failed += 1;
+                result.fail(
+                    "read",
+                    &format!("file could not be read as UTF-8 ({:?})", e.kind()),
+                );
+                continue;
+            }
         };
         let text = if ext.starts_with("htm") {
             strip_tags(&raw)
@@ -368,25 +534,44 @@ fn run_inbox(store: &Store) -> Option<SyncResult> {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         let actions = recap::actions(&text);
-        if actions.is_empty() {
-            if let Ok(report) = minutes::ingest(store, &text) {
-                added += report.actions;
+        let saved = if actions.is_empty() {
+            minutes::ingest(store, &text).map(|report| BatchCounts {
+                added: report.actions,
+                skipped: report.skipped,
+            })
+        } else {
+            let refs: Vec<String> = actions
+                .iter()
+                .map(|title| format!("minutes:{name}:{title}"))
+                .collect();
+            ingest_candidates(
+                store,
+                "meeting",
+                actions
+                    .iter()
+                    .zip(&refs)
+                    .map(|(title, reference)| (title.as_str(), reference.as_str())),
+            )
+        };
+        match saved {
+            Ok(counts) => {
+                result.files_processed += 1;
+                result.candidates_added += counts.added;
+                result.candidates_skipped += counts.skipped;
             }
-            continue;
-        }
-        for title in actions {
-            let source_ref = format!("minutes:{name}:{title}");
-            if store
-                .add_candidate(&title, "meeting", Some(&source_ref))
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                added += 1;
+            Err(error) => {
+                result.files_failed += 1;
+                result.fail(
+                    "store",
+                    &format!(
+                        "file candidate batch failed; rolled back ({})",
+                        safe_error_kind(&error)
+                    ),
+                );
             }
         }
     }
-    Some(counted("minutes", added))
+    Some(result)
 }
 
 fn strip_tags(text: &str) -> String {
@@ -422,6 +607,8 @@ fn run_graph(store: &Store, cfg: &Config) -> SyncResult {
                     candidates_added: 0,
                     candidates_skipped: 0,
                     events: 0,
+                    files_processed: 0,
+                    files_failed: 0,
                     error: Some(e.to_string()),
                 },
             }
@@ -432,6 +619,8 @@ fn run_graph(store: &Store, cfg: &Config) -> SyncResult {
             candidates_added: 0,
             candidates_skipped: 0,
             events: 0,
+            files_processed: 0,
+            files_failed: 0,
             error: Some(e.to_string()),
         },
     }
@@ -459,77 +648,57 @@ fn counted(name: &str, added: usize) -> SyncResult {
         candidates_added: added,
         candidates_skipped: 0,
         events: 0,
+        files_processed: 0,
+        files_failed: 0,
         error: None,
     }
 }
 
 fn run_github(store: &Store) -> Option<SyncResult> {
-    if crate::github::token().is_none() {
-        return None;
-    }
-    match crate::github::fetch_assigned() {
-        Ok(items) => github_intake::ingest(store, &items)
-            .ok()
-            .map(|n| counted("github", n)),
-        Err(e) => Some(SyncResult {
-            name: "github".into(),
-            ok: false,
-            candidates_added: 0,
-            candidates_skipped: 0,
-            events: 0,
-            error: Some(e.to_string()),
-        }),
-    }
+    run_adapter(
+        "github",
+        crate::github::token().is_some(),
+        crate::github::fetch_assigned,
+        |items| github_intake::ingest_report(store, &items),
+    )
 }
 
 fn run_jira(store: &Store) -> Option<SyncResult> {
-    if crate::jira::creds().is_none() {
-        return None;
-    }
-    match crate::jira::fetch_assigned() {
-        Ok(items) => jira_live::ingest(store, &items)
-            .ok()
-            .map(|n| counted("jira", n)),
-        Err(e) => Some(SyncResult {
-            name: "jira".into(),
-            ok: false,
-            candidates_added: 0,
-            candidates_skipped: 0,
-            events: 0,
-            error: Some(e.to_string()),
-        }),
-    }
+    run_adapter(
+        "jira",
+        crate::jira::creds().is_some(),
+        crate::jira::fetch_assigned,
+        |items| jira_live::ingest_report(store, &items),
+    )
 }
 
 fn run_teams(store: &Store) -> Option<SyncResult> {
-    if crate::chat::token().is_none() {
-        return None;
-    }
-    match crate::chat::fetch_recent() {
-        Ok(items) => chat_live::ingest(store, &items)
-            .ok()
-            .map(|n| counted("teams", n)),
-        Err(e) => Some(SyncResult {
-            name: "teams".into(),
-            ok: false,
-            candidates_added: 0,
-            candidates_skipped: 0,
-            events: 0,
-            error: Some(e.to_string()),
-        }),
-    }
+    run_adapter(
+        "teams",
+        crate::chat::token().is_some(),
+        crate::chat::fetch_recent,
+        |items| chat_live::ingest_report(store, &items),
+    )
 }
 
 pub fn sync_all_json(store: &Store, cfg: &Config) -> Value {
-    let results = sync_all(store, cfg);
+    results_json(&sync_all(store, cfg))
+}
+
+pub fn results_json(results: &[SyncResult]) -> Value {
     let sources: Vec<Value> = results
         .iter()
         .map(|r| {
             json!({
                 "name": r.name,
                 "ok": r.ok,
+                "status": r.status(),
+                "error": r.error,
                 "candidates_added": r.candidates_added,
+                "candidates_skipped": r.candidates_skipped,
                 "events": r.events,
+                "files_processed": r.files_processed,
+                "files_failed": r.files_failed,
             })
         })
         .collect();
@@ -559,6 +728,105 @@ fn parse_since(spec: Option<&str>, lookback_days: i64) -> Result<DateTime<Local>
                     .and_then(|ndt| ndt.and_local_timezone(Local).earliest())
                     .ok_or_else(|| anyhow::anyhow!("since を解釈できません: {s}"))
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod sync_result_tests {
+    use super::*;
+
+    #[test]
+    fn fetched_adapter_failure_is_retained_and_sanitized_for_every_source() {
+        for name in ["github", "devops", "jira", "teams"] {
+            let failed = run_adapter(
+                name,
+                true,
+                || Ok(vec!["synthetic"]),
+                |_| {
+                    Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(19),
+                        Some("secret-body".into()),
+                    )
+                    .into())
+                },
+            )
+            .unwrap();
+            assert_eq!(failed.name, name);
+            assert_eq!(failed.status(), "failed");
+            assert_eq!(failed.candidates_added, 0);
+            assert!(failed.error.as_deref().unwrap().contains("store"));
+            assert!(failed
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("ConstraintViolation"));
+            assert!(!failed.error.as_deref().unwrap().contains("secret-body"));
+            let json = results_json(&[failed]);
+            assert_eq!(json["sources"].as_array().unwrap().len(), 1);
+            assert_eq!(json["errors"].as_array().unwrap().len(), 1);
+            assert_eq!(json["sources"][0]["status"], "failed");
+        }
+    }
+
+    #[test]
+    fn unconfigured_zero_and_fetch_failure_are_distinct() {
+        let skipped = run_adapter::<()>(
+            "github",
+            false,
+            || panic!("must not fetch"),
+            |_| panic!("must not ingest"),
+        );
+        assert!(skipped.is_none());
+        let empty = run_adapter("github", true, || Ok(()), |_| Ok(BatchCounts::default())).unwrap();
+        assert_eq!(empty.status(), "success");
+        assert_eq!(empty.candidates_added, 0);
+        let failed = run_adapter::<()>(
+            "github",
+            true,
+            || anyhow::bail!("secret token"),
+            |_| panic!("must not ingest"),
+        )
+        .unwrap();
+        assert_eq!(failed.status(), "failed");
+        assert_eq!(
+            failed.error.as_deref(),
+            Some("fetch: source retrieval failed")
+        );
+    }
+
+    #[test]
+    fn ledger_failure_appends_to_import_failure_and_preserves_counts() {
+        let mut result = counted("minutes", 2);
+        result.fail("read", "invalid UTF-8");
+        persist_result(&mut result, |r, status| {
+            assert_eq!(r.candidates_added, 2);
+            assert_eq!(status, "partial");
+            Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(8),
+                Some("secret path".into()),
+            )
+            .into())
+        });
+        assert_eq!(result.status(), "partial");
+        let error = result.error.as_deref().unwrap();
+        assert!(error.contains("read:"));
+        assert!(error.contains("sync_record:"));
+        assert!(error.contains("ReadOnly"));
+        assert!(!error.contains("secret"));
+        assert!(result.serve_line().contains("候補 +2"));
+    }
+
+    #[test]
+    fn operational_zero_keeps_conservative_coverage_and_failure_is_recorded() {
+        for (ok, expected) in [(true, "partial"), (false, "failed")] {
+            let mut result = counted("github", 0);
+            result.ok = ok;
+            persist_result(&mut result, |_, status| {
+                assert_eq!(status, expected);
+                Ok(())
+            });
+            assert_eq!(result.ok, ok);
         }
     }
 }

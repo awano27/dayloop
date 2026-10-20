@@ -420,20 +420,20 @@ fn run() -> Result<i32> {
                 t.state.label_ja()
             );
             if let Some(d) = plan {
-                markdown::export(&store, &d)?;
+                markdown::export_if_open(&store, &d)?;
             }
             0
         }
         Cmd::Plan { date } => {
             let d = resolve_date(date.as_deref())?;
             let o = rituals::plan_ritual(&store, &ui, &d)?;
-            markdown::export(&store, &d)?;
+            markdown::export_if_open(&store, &d)?;
             finish(o)
         }
         Cmd::Check { date } => {
             let d = resolve_date(date.as_deref())?;
             let o = rituals::check_ritual(&store, &ui, &d)?;
-            markdown::export(&store, &d)?;
+            markdown::export_if_open(&store, &d)?;
             finish(o)
         }
         Cmd::Start { id, date } => {
@@ -536,16 +536,13 @@ fn run() -> Result<i32> {
                 println!("  {}  {}", short(&n.id), n.title);
             }
             export_for(&store, &old)?;
-            markdown::export(&store, &to)?;
+            markdown::export_if_open(&store, &to)?;
             0
         }
         Cmd::Close { date } => {
             let d = resolve_date(date.as_deref())?;
-            let already_closed = store.get_day(&d)?.and_then(|day| day.closed_at).is_some();
             let o = rituals::close_ritual(&store, &ui, &d)?;
-            if !already_closed {
-                markdown::export(&store, &d)?;
-            }
+            markdown::export_if_open(&store, &d)?;
             finish(o)
         }
         Cmd::Retro { date } => {
@@ -617,7 +614,7 @@ fn run() -> Result<i32> {
             let d = resolve_date(date.as_deref())?;
             let r = markdown::import(&store, &d)?;
             println!("取り込み: 完了 {} 件、新規 {} 件", r.completed, r.added);
-            markdown::export(&store, &d)?;
+            markdown::export_if_open(&store, &d)?;
             0
         }
         Cmd::Steps { action } => {
@@ -810,7 +807,7 @@ fn run_jev_eval(live: bool) -> Result<i32> {
 
 fn export_for(store: &Store, t: &model::Task) -> Result<()> {
     if let Some(d) = &t.plan_date {
-        markdown::export(store, d)?;
+        markdown::export_if_open(store, d)?;
     }
     Ok(())
 }

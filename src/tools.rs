@@ -120,7 +120,7 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
         "confirm_plan" => {
             let d = date_arg(args)?;
             store.confirm_plan(&d, opt_str(args, "plan_revision").as_deref())?;
-            markdown::export(store, &d)?;
+            markdown::export_if_open(store, &d)?;
             let day = store.get_day(&d)?;
             Ok(json!({ "plan_confirmed_at": day.and_then(|x| x.plan_confirmed_at) }))
         }
@@ -234,7 +234,7 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
             };
             let news = store.split(&old.id, &titles, &reason, &to)?;
             export_task(store, &old)?;
-            markdown::export(store, &to)?;
+            markdown::export_if_open(store, &to)?;
             Ok(serde_json::to_value(news)?)
         }
         "check_in" => {
@@ -249,10 +249,7 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
             observe_first(store, &d)?;
             crate::graph::apply_known_tasks(store, &d)?;
             crate::jev::grow_if_configured(store, &d)?;
-            let status = store.close_day_status(&d)?;
-            if status.closed && !status.already_closed {
-                markdown::export(store, &d)?;
-            }
+            let status = store.close_day_with_journal(&d)?;
             engine::close_status_view(store, &d, &status)
         }
         "retro_week" => engine::retro_view(store, &date_arg(args)?),
@@ -292,7 +289,7 @@ fn call(store: &Store, name: &str, args: &Value) -> Result<Value> {
         "import_markdown" => {
             let d = date_arg(args)?;
             let r = markdown::import(store, &d)?;
-            markdown::export(store, &d)?;
+            markdown::export_if_open(store, &d)?;
             Ok(json!({ "completed": r.completed, "added": r.added }))
         }
         "sync_sources" => {
@@ -319,7 +316,7 @@ fn observe_first(store: &Store, date: &str) -> Result<()> {
 
 fn export_task(store: &Store, t: &crate::model::Task) -> Result<()> {
     if let Some(d) = &t.plan_date {
-        markdown::export(store, d)?;
+        markdown::export_if_open(store, d)?;
     }
     Ok(())
 }

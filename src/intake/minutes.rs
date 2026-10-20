@@ -173,6 +173,7 @@ fn is_heading(line: &str) -> bool {
 
 pub struct MinuteReport {
     pub actions: usize,
+    pub skipped: usize,
     pub info: usize,
     pub ignored: usize,
 }
@@ -184,13 +185,18 @@ pub fn ingest(store: &Store, text: &str) -> Result<MinuteReport> {
             route: cfg.jev.route.clone(),
             timeout_ms: cfg.jev.timeout_ms,
         };
-        let floor = cfg.jev.commit_confidence.unwrap_or(crate::jev::DEFAULT_FLOOR);
+        let floor = cfg
+            .jev
+            .commit_confidence
+            .unwrap_or(crate::jev::DEFAULT_FLOOR);
         judge_ignored(text, &mut decider, floor)
     } else {
         read_minutes(text)
     };
+    let tx = store.connection().unchecked_transaction()?;
     let mut report = MinuteReport {
         actions: 0,
+        skipped: 0,
         info: 0,
         ignored: 0,
     };
@@ -203,12 +209,15 @@ pub fn ingest(store: &Store, text: &str) -> Result<MinuteReport> {
                     .is_some()
                 {
                     report.actions += 1;
+                } else {
+                    report.skipped += 1;
                 }
             }
             MinuteLine::Info => report.info += 1,
             MinuteLine::Ignore => report.ignored += 1,
         }
     }
+    tx.commit()?;
     Ok(report)
 }
 
@@ -251,9 +260,15 @@ mod tests {
         impl crate::jev::Decider for Pick {
             fn decide(&mut self, state: &str, _choices: &[String]) -> crate::jev::JevOutcome {
                 if state == "見積を直す" {
-                    crate::jev::JevOutcome::Answer { choice: "決定".into(), confidence: 0.9 }
+                    crate::jev::JevOutcome::Answer {
+                        choice: "決定".into(),
+                        confidence: 0.9,
+                    }
                 } else {
-                    crate::jev::JevOutcome::Answer { choice: "無視".into(), confidence: 0.9 }
+                    crate::jev::JevOutcome::Answer {
+                        choice: "無視".into(),
+                        confidence: 0.9,
+                    }
                 }
             }
         }

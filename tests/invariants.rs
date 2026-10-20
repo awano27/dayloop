@@ -278,3 +278,34 @@ fn concurrent_close_and_add_never_leave_open_work_on_closed_date() {
         }
     }
 }
+
+#[test]
+fn routine_journal_refresh_waits_for_inflight_closure_in_wal_mode() {
+    let home = Home::new();
+    let store = home.store();
+    let date = "2026-09-03";
+    store.ensure_day(date).unwrap();
+    dayloop::markdown::export(&store, date).unwrap();
+    let writer = rusqlite::Connection::open(home.dir.join("dayloop.db")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    writer.execute("UPDATE days SET closed_at='2026-09-03T18:00:00+09:00' WHERE date=?1", [date]).unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let refresh = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let result = dayloop::markdown::export_if_open(&store, date);
+        finished_tx.send(result).unwrap();
+    });
+    started_rx.recv().unwrap();
+    let before_commit = finished_rx.recv_timeout(std::time::Duration::from_millis(200));
+    let final_bytes = b"Final journal with a hand-written note\n";
+    std::fs::write(home.dir.join("days").join(format!("{date}.md")), final_bytes).unwrap();
+    writer.execute_batch("COMMIT").unwrap();
+    let blocked = matches!(before_commit, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+    if blocked {
+        finished_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap();
+    }
+    refresh.join().unwrap();
+    assert!(blocked, "routine refresh must serialize with an in-flight close writer");
+    assert_eq!(std::fs::read(home.dir.join("days").join(format!("{date}.md"))).unwrap(), final_bytes);
+}
